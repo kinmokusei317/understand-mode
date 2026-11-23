@@ -13,10 +13,15 @@ const apiHeaders = { 'Content-Type': 'application/json', 'X-Understand-Token': T
 const S = { stickies: {}, order: [], pan: { x: 40, y: 20 }, zoom: 1, seq: 0, focus: null };
 let pendingCount = 0;
 let selCtx = null;
+let selectedForReturn = null; // Codexの「選んだ文を返す」用。空白・改行を含む選択範囲そのまま（保存はしない）
 let mmSeq = 0;
 // メインが確認なしで動いているか。/api/init で届く
 let autoRun = false;
-let sqlEnabled = true;
+// SQLを実行できるか（Codex では提案まで）。/api/init で届く
+let canRunSql = true;
+// 応答してくれる側の呼び名（Claude / Codex）。表示だけに使う
+let agentLabel = 'Claude';
+let isCodex = false;
 
 const board = $('#board'), world = $('#world'), wires = $('#wires');
 const mainCard = $('#main-card'), mainBody = $('#main-body');
@@ -71,7 +76,13 @@ async function init() {
     }
   });
   autoRun = !!data.autoRun;
-  sqlEnabled = data.sqlEnabled !== false;
+  canRunSql = data.canRunSql !== false && data.sqlEnabled !== false;
+  agentLabel = data.backend === 'codex' ? 'Codex' : 'Claude';
+  isCodex = data.backend === 'codex';
+  $('#btn-sel-return').hidden = !isCodex; // そのまま返す口は Codex だけ
+  mainCard.querySelector('.eyebrow').textContent = `本筋（${agentLabel}の出力）`;
+  $('#pending').textContent = `${agentLabel}が考えています…`;
+  $('#done p').textContent = `${agentLabel} に戻って「終わった」と伝えてください。このタブは閉じて大丈夫です。`;
   $('#project').textContent = data.title || (data.project ? `プロジェクト：${data.project}` : '');
   if (!data.hasSession) $('#project').textContent += '（メインのセッションが見つかりません）';
   restore();
@@ -187,8 +198,10 @@ document.addEventListener('mouseup', (e) => {
   if (e.target.closest('#sel-menu')) return;
   setTimeout(() => {
     const sel = window.getSelection();
-    const text = sel ? sel.toString().trim() : '';
-    if (!text || !sel.rangeCount) return hideMenu();
+    const raw = sel ? sel.toString() : '';
+    const text = raw.trim();
+    // 空白だけの選択でも Codex なら「そのまま返す」に使えるのでメニューは出す
+    if (!sel || !sel.rangeCount || (!text && !(isCodex && raw))) return hideMenu();
     const range = sel.getRangeAt(0);
     const node = range.commonAncestorContainer;
     const host = (node.nodeType === 1 ? node : node.parentElement).closest('.selectable');
@@ -199,7 +212,8 @@ document.addEventListener('mouseup', (e) => {
     const rect = range.getBoundingClientRect();
     const srcRect = srcEl.getBoundingClientRect();
     const inCode = !!(node.nodeType === 1 ? node : node.parentElement).closest('pre') || !!(range.startContainer.parentElement && range.startContainer.parentElement.closest('pre'));
-    selCtx = { text: text.slice(0, inCode ? 3000 : 600), source, anchorY: (rect.top + rect.height / 2 - srcRect.top) / S.zoom, code: inCode, lines: inCode ? lineRangeOf(range) : '' };
+    selCtx = { text: text.slice(0, inCode ? 3000 : 600), source, anchorY: (rect.top + rect.height / 2 - srcRect.top) / S.zoom, code: inCode, lines: inCode ? lineRangeOf(range) : '', raw: isCodex ? raw : null };
+    $('#sel-menu').classList.toggle('blank-selection', !text); // 中身が無い選択は付箋系の動作を隠す
     showMenu(rect);
   }, 0);
 });
@@ -223,6 +237,13 @@ $('#sel-menu').addEventListener('click', (e) => {
   if (!b || !selCtx) return;
   hideMenu();
   window.getSelection().removeAllRanges();
+  if (b.dataset.action === 'return') {
+    selectedForReturn = selCtx.raw; // 送るのは選択時に取ったそのままの文字列
+    openSelectionReturn();
+    selCtx = null;
+    return;
+  }
+  selectedForReturn = null;
   createSticky(b.dataset.action, selCtx);
   selCtx = null;
 });
@@ -314,7 +335,7 @@ function setPending(d) {
   pendingCount += d;
   const p = $('#pending');
   p.hidden = pendingCount <= 0;
-  p.textContent = pendingCount > 1 ? `Claudeが考えています…（${pendingCount}）` : 'Claudeが考えています…';
+  p.textContent = pendingCount > 1 ? `${agentLabel}が考えています…（${pendingCount}）` : `${agentLabel}が考えています…`;
 }
 
 function anchorFor(st) {
@@ -339,7 +360,7 @@ async function ask(st, { action, question, followUp }) {
   save(); renderSticky(st); refreshStatus(); drawWires();
 
   // メインが確認なしで動いているなら、提案されたSQLはそのまま実行する
-  if (r.ok && autoRun) {
+  if (r.ok && autoRun && canRunSql) {
     const msg = st.messages[st.messages.length - 1];
     const sql = firstSql(msg.text);
     if (sql) await runSql(st, msg, sql);
@@ -353,7 +374,7 @@ function firstSql(text) {
 }
 
 async function runSql(st, msg, sql) {
-  if (st.busy) return;
+  if (st.busy || !canRunSql) return;
   if (!st.sessionId) { st.messages.push({ role: 'error', text: 'この付箋にはまだセッションがありません。' }); return renderSticky(st); }
   msg.ranSql = (msg.ranSql || []).concat([sql.trim()]);
   st.messages.push({ role: 'user', text: autoRun ? 'このSQLを実行（メインと同じく確認なし）' : 'このSQLを承認して実行' });
@@ -441,7 +462,7 @@ function renderSticky(st, skipWires) {
     return finish();
   }
   st.messages.forEach((m) => body.append(renderMessage(st, m)));
-  if (st.busy) body.append(el('div', 'msg thinking', 'Claudeが考えています…'));
+  if (st.busy) body.append(el('div', 'msg thinking', `${agentLabel}が考えています…`));
   box.append(body);
 
   // 入力欄
@@ -518,7 +539,7 @@ function renderMessage(st, m) {
   wrap.append(div);
 
   if (m.kind === 'result') {
-    wrap.append(el('div', 'source-line', `出典：Claudeが取得した結果（${m.at} に${m.auto ? '実行' : '承認して実行'}）。グラフの値は結果の表から描いています。`));
+    wrap.append(el('div', 'source-line', `出典：${agentLabel}が取得した結果（${m.at} に${m.auto ? '実行' : '承認して実行'}）。グラフの値は結果の表から描いています。`));
   }
 
   // 「本筋への影響：」を見つけたら目立たせる
@@ -539,10 +560,13 @@ function sqlBox(st, m, sql, pre) {
   const ran = (m.ranSql || []).includes(sql.trim()) || m.kind === 'result';
   const box = el('div', 'sql-box' + (ran ? ' ran' : ''));
   const head = el('div', 'sql-head');
-  head.append(el('span', null, ran ? '実行したSQL' : (autoRun ? '提案されたSQL（まもなく実行します）' : '提案されたSQL（まだ実行していません）')));
+  const label = !canRunSql ? '提案されたSQL（この環境では実行しません）'
+    : ran ? '実行したSQL'
+    : (autoRun ? '提案されたSQL（まもなく実行します）' : '提案されたSQL（まだ実行していません）');
+  head.append(el('span', null, label));
   head.append(el('span', 'spacer'));
   const code = pre.querySelector('code');
-  if (!ran) {
+  if (!ran && canRunSql) {
     const edit = el('button', 'btn-mini', '直す');
     edit.onclick = () => {
       const on = code.getAttribute('contenteditable') === 'true';
@@ -551,8 +575,7 @@ function sqlBox(st, m, sql, pre) {
       if (!on) code.focus();
     };
     const run = el('button', 'btn-run', '承認して実行');
-    run.disabled = !!st.busy || !sqlEnabled;
-    if (!sqlEnabled) run.title = 'CodexではSQLを実行できません';
+    run.disabled = !!st.busy;
     run.onclick = () => runSql(st, m, code.textContent);
     head.append(edit, run);
   }
@@ -883,6 +906,26 @@ $('#btn-finish').onclick = () => {
 };
 $('#btn-ret-back').onclick = () => { $('#return-modal').hidden = true; };
 
+// 選んだ文をそのまま返す（Codex のときだけ見える口）。
+// 選択時に取ったそのままの文字列を、確認用に読み取り専用で見せる。
+// 送るのは「取ったときの文字列」であって、プレビューの textarea の値ではない
+// （textarea は CRLF を LF に揃えてしまうことがあるので）。
+// 送信に失敗しても消さない：戻るを押すか、成功するまで覚えておく。
+function openSelectionReturn() {
+  $('#selection-preview').value = selectedForReturn == null ? '' : selectedForReturn;
+  $('#selection-return-modal').hidden = false;
+}
+$('#btn-selection-back').onclick = () => {
+  selectedForReturn = null;
+  $('#selection-return-modal').hidden = true;
+};
+$('#btn-selection-send').onclick = async () => {
+  if (selectedForReturn == null) return;
+  const btn = $('#btn-selection-send');
+  btn.disabled = true;
+  try { await finishWith(selectedForReturn); } finally { btn.disabled = false; }
+};
+
 $('#btn-draft').onclick = async () => {
   const ids = [...document.querySelectorAll('#ret-list input:checked')].map((c) => c.dataset.id);
   if (!ids.length) { alert('付箋を1枚以上選んでください。'); return; }
@@ -906,12 +949,15 @@ async function finishWith(text) {
   const r = await post('/api/return', { text });
   if (!r.ok) { alert(r.error || '送れませんでした'); return; }
   try { sessionStorage.removeItem(STORE_KEY); } catch (_) {}
+  selectedForReturn = null;
   $('#return-modal').hidden = true;
+  $('#selection-return-modal').hidden = true;
   $('#done').hidden = false;
 }
 $('#btn-ret-send').onclick = () => {
-  const t = $('#ret-text').value.trim();
-  if (!t && !confirm('返す文が空です。何も返さずに閉じますか？')) return;
+  // 選んだ文はそのまま送る（空白の調整はサーバー側の約束に任せる）
+  const t = $('#ret-text').value;
+  if (!t.trim() && !confirm('返す文が空です。何も返さずに閉じますか？')) return;
   finishWith(t);
 };
 $('#btn-ret-none').onclick = () => { if (confirm('何も返さずに閉じますか？付箋はすべて破棄されます。')) finishWith(''); };

@@ -21,7 +21,8 @@ const ok = (name, cond, detail) => {
 };
 
 (async () => {
-  const browser = await chromium.launch();
+  const browser = await chromium.launch(process.env.UNDERSTAND_TEST_BROWSER
+    ? { executablePath: process.env.UNDERSTAND_TEST_BROWSER } : {});
   const page = await browser.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
