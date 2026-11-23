@@ -97,12 +97,112 @@ const delay = ms => new Promise(r => setTimeout(r, ms));
         await page.fill('#ret-text', '  選んだ文だけ  ');
         await page.click('#btn-ret-send');
         await page.waitForSelector('#done:not([hidden])');
-        assert.strictEqual(fs.readFileSync(path.join(dir, 'return.md'), 'utf8'), '  選んだ文だけ  \n');
+        assert.strictEqual(fs.readFileSync(path.join(dir, 'return.md'), 'utf8'), '  選んだ文だけ  ');
       } finally { await browser.close(); }
       console.log('Codex browser SQL control and selected-text return passed');
+
+      // --- 選んだ文をそのまま返す（別ボード。本文に .ln の長い pre を置く） ---
+      const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'understand-codex-sel-'));
+      const proc2 = spawn(process.execPath, [server, '--backend', 'codex', '--dir', dir2, '--cwd', root, '--no-open', '--session', main], { env });
+      proc2.stdout.on('data', d => output += d);
+      proc2.stderr.on('data', d => output += d);
+      try {
+        const lines = [];
+        for (let i = 0; i < 80; i++) lines.push(`  先頭に空白のある ${i} 行目、日本語と trailing space  `);
+        const EXPECTED = lines.join('\n');
+        assert.ok(EXPECTED.length > 3000, EXPECTED.length);
+        fs.writeFileSync(path.join(dir2, 'main.md'), '# 本筋\n\n```text fixture.txt:1\n' + EXPECTED + '\n```\n');
+        for (let i = 0; i < 100 && !fs.existsSync(path.join(dir2, 'url.txt')); i++) await delay(30);
+        assert.ok(fs.existsSync(path.join(dir2, 'url.txt')), output);
+        const url2 = new URL(fs.readFileSync(path.join(dir2, 'url.txt'), 'utf8'));
+        const browser2 = await chromium.launch({ executablePath: process.env.UNDERSTAND_TEST_BROWSER });
+        try {
+          // 小さい画面でもメニューが画面内に収まることを確かめる
+          const page2 = await browser2.newPage({ viewport: { width: 380, height: 640 } });
+          page2.on('dialog', (d) => d.accept());
+          const apiCalls = [];
+          const postedReturns = [];
+          page2.on('request', (req) => {
+            const m = req.url().match(/\/api\/(\w+)/);
+            if (m && req.method() === 'POST') {
+              apiCalls.push(m[1]);
+              if (m[1] === 'return') postedReturns.push(req.postData());
+            }
+          });
+          await page2.goto(url2.href);
+          await page2.waitForSelector('#main-body pre.numbered .ln');
+          const selectAll = () => page2.evaluate(() => {
+            const lns = document.querySelectorAll('#main-body pre.numbered .ln');
+            const first = lns[0].firstChild, last = lns[lns.length - 1].firstChild;
+            const r = document.createRange();
+            r.setStart(first, 0); r.setEnd(last, last.data.length);
+            const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+            const rect = r.getBoundingClientRect();
+            first.parentElement.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: rect.right, clientY: rect.bottom }));
+            return s.toString();
+          });
+          const got = await selectAll();
+          assert.strictEqual(got, EXPECTED, 'selection text must equal the literal source');
+          await page2.waitForSelector('#sel-menu:not([hidden])');
+          const menuBox = await page2.locator('#sel-menu').boundingBox();
+          const vw = await page2.evaluate(() => window.innerWidth);
+          assert.ok(menuBox && menuBox.x >= 0 && menuBox.x + menuBox.width <= vw + 0.5,
+            `menu must stay inside the viewport: ${JSON.stringify(menuBox)} vs ${vw}`);
+          const visible = await page2.evaluate(() => !document.getElementById('btn-sel-return').hidden);
+          assert.strictEqual(visible, true, '選んだ文を返す button must be visible on Codex');
+          await page2.click('#btn-sel-return');
+          await page2.waitForSelector('#selection-return-modal:not([hidden])');
+          const preview = await page2.evaluate(() => {
+            const ta = document.getElementById('selection-preview');
+            return { readonly: ta.readOnly, value: ta.value };
+          });
+          assert.strictEqual(preview.readonly, true, 'preview must be readonly');
+          assert.strictEqual(preview.value, EXPECTED, 'preview shows the snapshot');
+          await page2.click('#btn-selection-back');
+          await page2.waitForSelector('#selection-return-modal', { state: 'hidden' });
+          assert.ok(!fs.existsSync(path.join(dir2, 'return.md')), 'cancel must not write return.md');
+          assert.deepStrictEqual(apiCalls, [], 'cancel must not POST to the API');
+          // 選び直して確定……の前に、最初の送信が失敗してもスナップショットが残ることを確かめる
+          await selectAll();
+          await page2.waitForSelector('#sel-menu:not([hidden])');
+          await page2.click('#btn-sel-return');
+          await page2.waitForSelector('#selection-return-modal:not([hidden])');
+          let failedPosts = 0;
+          await page2.route('**/api/return', (route) => {
+            failedPosts++;
+            route.fulfill({ status: 200, contentType: 'application/json',
+              body: JSON.stringify({ ok: false, error: '一時的な失敗' }) });
+          });
+          const dialogP = page2.waitForEvent('dialog', { timeout: 10000 });
+          await page2.click('#btn-selection-send');
+          await dialogP; // 失敗の alert を受け取る
+          assert.strictEqual(failedPosts, 1, 'exactly one intercepted POST');
+          assert.ok(!fs.existsSync(path.join(dir2, 'return.md')), 'failed POST must not write return.md');
+          const stillThere = await page2.evaluate(() => ({
+            open: !document.getElementById('selection-return-modal').hidden,
+            value: document.getElementById('selection-preview').value,
+          }));
+          assert.strictEqual(stillThere.open, true, 'confirmation must stay open after a failed send');
+          assert.strictEqual(stillThere.value, EXPECTED, 'snapshot must survive a failed send');
+          await page2.unroute('**/api/return');
+          await page2.click('#btn-selection-send');
+          await page2.waitForSelector('#done:not([hidden])');
+          assert.deepStrictEqual(apiCalls, ['return', 'return'], `only /api/return expected: ${apiCalls}`);
+          assert.strictEqual(postedReturns.length, 2);
+          for (const body of postedReturns) {
+            assert.strictEqual(JSON.parse(body).text, EXPECTED, 'each POST must carry the original snapshot');
+          }
+          assert.ok(fs.readFileSync(path.join(dir2, 'return.md')).equals(Buffer.from(EXPECTED, 'utf8')),
+            'return.md must be the verbatim selected bytes');
+        } finally { await browser2.close(); }
+      } finally {
+        proc2.kill();
+        fs.rmSync(dir2, { recursive: true, force: true });
+      }
+      console.log('Codex browser selection-return passed');
     } else {
       assert.strictEqual((await api('return', { text: 'done' })).ok, true);
-      assert.strictEqual(fs.readFileSync(path.join(dir, 'return.md'), 'utf8'), 'done\n');
+      assert.strictEqual(fs.readFileSync(path.join(dir, 'return.md'), 'utf8'), 'done');
     }
     console.log('Codex integration tests passed');
   } finally {

@@ -178,7 +178,7 @@ def run(root, endpoint, model):
             print("Enabled MCP configuration rejected before inference.")
             selected = "  selected text  "
             assert api("return", {"text": selected})["ok"]
-            assert (board / "return.md").read_text() == selected + "\n"
+            assert (board / "return.md").read_bytes() == selected.encode("utf-8")
             server.wait(timeout=8)
             for owned in {cid, nested["sessionId"], sibling["sessionId"]}:
                 # Probe from a fresh empty store; never recreate the removed board home.

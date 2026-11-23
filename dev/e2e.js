@@ -49,7 +49,8 @@ const action = (page, a) => page.click(`#sel-menu button[data-action="${a}"]`);
 const idle = (page) => page.waitForFunction(() => document.querySelector('#pending').hidden, null, { timeout: 20000 });
 
 (async () => {
-  const browser = await chromium.launch();
+  const browser = await chromium.launch(process.env.UNDERSTAND_TEST_BROWSER
+    ? { executablePath: process.env.UNDERSTAND_TEST_BROWSER } : {});
   const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
@@ -61,6 +62,10 @@ const idle = (page) => page.waitForFunction(() => document.querySelector('#pendi
   // 用語
   await select(page, '#main-body', '日別に見ると12日と13日が突出していて');
   await page.screenshot({ path: `${OUT}/2-menu.png` });
+  // 「選んだ文を返す」は Codex 専用。Claude のメニューには出ないこと
+  if (await page.evaluate(() => !document.getElementById('btn-sel-return').hidden)) {
+    errors.push('Claude でも「選んだ文を返す」が見えている');
+  }
   await action(page, 'question');
   await page.fill('.sticky.focused textarea', 'この2日間だけで説明できるの？');
   await page.click('.sticky.focused .st-input button');
@@ -171,4 +176,5 @@ const idle = (page) => page.waitForFunction(() => document.querySelector('#pendi
   await page.waitForSelector('#done:not([hidden])');
   console.log('errors:', JSON.stringify(errors, null, 1));
   await browser.close();
+  process.exit(errors.length ? 1 : 0);
 })().catch((e) => { console.error('FAIL', e); process.exit(1); });

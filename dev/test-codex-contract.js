@@ -11,6 +11,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const http = require('http');
 const { spawn, spawnSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
@@ -82,7 +83,7 @@ function permissionNotes(argv) {
   return bad;
 }
 
-function startServer({ session = P, timeoutSec = '10' } = {}) {
+function startServer({ session = P, timeoutSec = '10', codexBin = MOCK } = {}) {
   const dir = fs.mkdtempSync(path.join(TMP, 'work-'));
   fs.writeFileSync(path.join(dir, 'main.md'), '# テスト\n');
   fs.writeFileSync(path.join(dir, 'title.txt'), 'テスト\n');
@@ -93,7 +94,7 @@ function startServer({ session = P, timeoutSec = '10' } = {}) {
       HOME: FAKE_HOME,
       CODEX_HOME,
       UNDERSTAND_AGENT: 'codex',
-      UNDERSTAND_CODEX_BIN: MOCK,
+      UNDERSTAND_CODEX_BIN: codexBin,
       UNDERSTAND_CLAUDE_BIN: MOCK, // 旧経路が何か呼んだかも記録したい
       MOCK_CODEX_STORE: STORE,
       MOCK_CODEX_LOG: LOG,
@@ -119,6 +120,11 @@ const post = (s, route, body) =>
   }).then((r) => r.json().then((j) => Object.assign({ status: r.status }, j)));
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// 生きているかどうかは signal 0 でだけ見る（何も殺さない）
+function isAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code !== 'ESRCH'; }
+}
 
 // 偽 codex を直接動かして、記録器が正しいことを先に確かめる（陽性対照）
 function mockDirect(argv2, input, home = CODEX_HOME) {
@@ -348,8 +354,8 @@ function mockDirect(argv2, input, home = CODEX_HOME) {
     const selected = '  イベントだけでは説明できない、と伝えたい  ';
     const r = await post(s, '/api/return', { text: selected });
     ok('return が通る', r.ok === true, JSON.stringify(r));
-    const ret = fs.readFileSync(path.join(s.dir, 'return.md'), 'utf8');
-    ok('return.md は選んだ文そのまま', ret === selected + '\n', JSON.stringify(ret));
+    const ret = fs.readFileSync(path.join(s.dir, 'return.md'));
+    ok('return.md は選んだ文そのまま（バイト一致）', ret.equals(Buffer.from(selected, 'utf8')), JSON.stringify(ret.toString('utf8')));
     await wait(1200); // サーバーの後片付けと終了を待つ
     ok('親の記録は残る', fs.existsSync(rolloutPath(P)));
     ok('無関係な枝の記録は残る', fs.existsSync(rolloutPath(F)));
@@ -365,6 +371,120 @@ function mockDirect(argv2, input, home = CODEX_HOME) {
     ok('親はいまも resume できる', mockDirect(['exec', '--json', 'resume', P, '-'], 'ask:X').status === 0);
     ok('無関係な枝も resume できる', mockDirect(['exec', '--json', 'resume', F, '-'], 'ask:X').status === 0);
     s.stop();
+  }
+
+  console.log('\n12. return.md は選んだバイト列を改変しない（空・空白のみ・改行なし・CRLF）');
+  for (const [name, selected] of [
+    ['空（0バイト）', ''],
+    ['空白だけ', ' \t  '],
+    ['末尾に改行なし', 'これを返す'],
+    ['末尾に改行が2つある', '返したい文\n\n'],
+    ['複数行とCRLF', ' 一行目\r\n二行目\r\n  三行目  '],
+  ]) {
+    const sx = await startServer();
+    const r = await post(sx, '/api/return', { text: selected });
+    const buf = fs.readFileSync(path.join(sx.dir, 'return.md'));
+    ok(`${name} → バイト一致`, r.ok === true && buf.equals(Buffer.from(selected, 'utf8')),
+      JSON.stringify(r) + ' / ' + JSON.stringify(buf.toString('utf8')));
+    sx.stop();
+    await wait(400);
+  }
+
+  console.log('\n13. HTTP の本文が日本語の文字の途中で分かれて届いても壊さない');
+  {
+    const sx = await startServer();
+    const selected = '日本語の途中で切った文をそのまま返したい';
+    const body = Buffer.from(JSON.stringify({ text: selected }), 'utf8');
+    // マルチバイト文字の継続バイト（0b10xxxxxx）の直前で切る → 片側に壊れた UTF-8 ができる
+    let cut = -1;
+    for (let i = 1; i < body.length; i++) { if ((body[i] & 0xc0) === 0x80) { cut = i; break; } }
+    const u = new URL(sx.base + '/api/return');
+    const r = await new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: u.hostname, port: u.port, path: u.pathname, method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Understand-Token': sx.token },
+      }, resolve);
+      req.on('error', reject);
+      req.write(body.slice(0, cut), () => setTimeout(() => req.end(body.slice(cut)), 80));
+    });
+    let text = '';
+    await new Promise((res) => { r.on('data', (c) => { text += c; }); r.on('end', res); });
+    const j = JSON.parse(text);
+    const buf = fs.readFileSync(path.join(sx.dir, 'return.md'));
+    ok('分割しても ok', j.ok === true, text);
+    ok('ファイルは完全なバイト列', buf.equals(Buffer.from(selected, 'utf8')), JSON.stringify(buf.toString('utf8')));
+    sx.stop();
+    await wait(400);
+  }
+
+  console.log('\n14. 子プロセスはグループごと止まる（閉じる途中の推論・タイムアウト・残党）');
+  if (process.platform === 'win32') {
+    ok('POSIX のプロセスグループが前提（この環境では未対応）', false, 'win32');
+  } else {
+    // 偽 codex の代わりに、同じグループに孫を1匹産む専用の仕込みを使う。
+    // 孫は自分のPIDを grandchild.pid に書き、12秒後には自力で終わる
+    // （拾い損ねでも残り続けない。自分から早めに終わる仕掛けは入れない）。
+    const hangBin = path.join(__dirname, 'fixtures', 'hang-codex.js');
+    const marker = path.join(TMP, 'grandchild.pid'); // 仕込みは MOCK_CODEX_LOG の隣に書く
+    const readGpid = async () => {
+      for (let i = 0; i < 120 && !fs.existsSync(marker); i++) await wait(50);
+      return fs.existsSync(marker) ? Number(fs.readFileSync(marker, 'utf8')) : null;
+    };
+    const boardRootOf = (dir) => fs.readdirSync(dir).find((f) => f.startsWith('codex-'));
+
+    // 14a. 閉じる途中の推論：グループごと止まり、ok:false、根は消える
+    {
+      fs.rmSync(marker, { force: true });
+      const sc = await startServer({ codexBin: hangBin });
+      const askP = post(sc, '/api/ask', { action: 'question', anchor: 'x', question: 'hang', sessionId: P });
+      const gpid = await readGpid();
+      ok('推論中の孫プロセスが生まれた', !!gpid && isAlive(gpid), `gpid=${gpid}`);
+      const root = boardRootOf(sc.dir);
+      ok('閉じる前に専用の根がある', !!root && fs.existsSync(path.join(sc.dir, root)), sc.dir);
+      const t0 = Date.now();
+      const ret = await post(sc, '/api/return', { text: '閉じる' });
+      const interrupted = await askP;
+      ok('中断した質問は ok:false', interrupted.ok === false, JSON.stringify(interrupted));
+      ok('return が時間内に通る', ret.ok === true && Date.now() - t0 < 8000, `${Date.now() - t0}ms ${JSON.stringify(ret)}`);
+      ok('孫はもういない（グループごと停止）', !!gpid && !isAlive(gpid), `gpid=${gpid}`);
+      ok('専用の根は消えた', !fs.existsSync(path.join(sc.dir, root)), sc.dir);
+      sc.stop();
+    }
+
+    // 14b. タイムアウト：kill が即時にかかり、根は close まで残る
+    {
+      fs.rmSync(marker, { force: true });
+      const st2 = await startServer({ timeoutSec: '2', codexBin: hangBin });
+      const t0 = Date.now();
+      const r2p = post(st2, '/api/ask', { action: 'question', anchor: 'x', question: 'hang', sessionId: P });
+      const gpid = await readGpid();
+      ok('タイムアウトの推論中にも孫は生まれている', !!gpid && isAlive(gpid), `gpid=${gpid}`);
+      const r2 = await r2p;
+      ok('タイムアウトで ok:false', r2.ok === false, JSON.stringify(r2));
+      ok('タイムアウトは時間内に返る', Date.now() - t0 < 8000, `${Date.now() - t0}ms`);
+      ok('タイムアウトで孫も消えた', !!gpid && !isAlive(gpid), `gpid=${gpid}`);
+      const root = boardRootOf(st2.dir);
+      ok('close 前は専用の根が残る', !!root && fs.existsSync(path.join(st2.dir, root)), st2.dir);
+      const ret2 = await post(st2, '/api/return', { text: 'x' });
+      ok('close すると根は消える', ret2.ok === true && !fs.existsSync(path.join(st2.dir, root)), JSON.stringify(ret2));
+      st2.stop();
+    }
+
+    // 14c. リーダーは普通に終わるが、管を切った子孫だけがグループに残る。
+    // リーダーの死の時点で残党も道連れにしないと、close を待たずに取りこぼす
+    {
+      fs.rmSync(marker, { force: true });
+      const se = await startServer({ codexBin: hangBin });
+      const t3 = Date.now();
+      const r3 = await post(se, '/api/ask', { action: 'question', anchor: 'x', question: 'exit-with-descendant', sessionId: P });
+      ok('普通に終わる推論は ok:true', r3.ok === true, JSON.stringify(r3));
+      ok('普通に終わる推論は時間内に返る', Date.now() - t3 < 8000, `${Date.now() - t3}ms`);
+      const gpid = await readGpid();
+      ok('終了した実行の孫は close を待たずに消えている', !!gpid && !isAlive(gpid), `gpid=${gpid}`);
+      const ret3 = await post(se, '/api/return', { text: 'x' });
+      ok('残党を拾ったあとも普通に閉じられる', ret3.ok === true, JSON.stringify(ret3));
+      se.stop();
+    }
   }
 
   console.log(failed ? `\n${failed}件 失敗しました\n` : '\nすべて通りました\n');
