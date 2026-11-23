@@ -16,6 +16,10 @@ let selCtx = null;
 let mmSeq = 0;
 // メインが確認なしで動いているか。/api/init で届く
 let autoRun = false;
+// SQLを実行できるか（Codex では提案まで）。/api/init で届く
+let canRunSql = true;
+// 応答してくれる側の呼び名（Claude / Codex）。表示だけに使う
+let agentLabel = 'Claude';
 
 const board = $('#board'), world = $('#world'), wires = $('#wires');
 const mainCard = $('#main-card'), mainBody = $('#main-body');
@@ -70,6 +74,11 @@ async function init() {
     }
   });
   autoRun = !!data.autoRun;
+  canRunSql = data.canRunSql !== false && data.sqlEnabled !== false;
+  agentLabel = data.backend === 'codex' ? 'Codex' : 'Claude';
+  mainCard.querySelector('.eyebrow').textContent = `本筋（${agentLabel}の出力）`;
+  $('#pending').textContent = `${agentLabel}が考えています…`;
+  $('#done p').textContent = `${agentLabel} に戻って「終わった」と伝えてください。このタブは閉じて大丈夫です。`;
   $('#project').textContent = data.title || (data.project ? `プロジェクト：${data.project}` : '');
   if (!data.hasSession) $('#project').textContent += '（メインのセッションが見つかりません）';
   restore();
@@ -312,7 +321,7 @@ function setPending(d) {
   pendingCount += d;
   const p = $('#pending');
   p.hidden = pendingCount <= 0;
-  p.textContent = pendingCount > 1 ? `Claudeが考えています…（${pendingCount}）` : 'Claudeが考えています…';
+  p.textContent = pendingCount > 1 ? `${agentLabel}が考えています…（${pendingCount}）` : `${agentLabel}が考えています…`;
 }
 
 function anchorFor(st) {
@@ -337,7 +346,7 @@ async function ask(st, { action, question, followUp }) {
   save(); renderSticky(st); refreshStatus(); drawWires();
 
   // メインが確認なしで動いているなら、提案されたSQLはそのまま実行する
-  if (r.ok && autoRun) {
+  if (r.ok && autoRun && canRunSql) {
     const msg = st.messages[st.messages.length - 1];
     const sql = firstSql(msg.text);
     if (sql) await runSql(st, msg, sql);
@@ -351,7 +360,7 @@ function firstSql(text) {
 }
 
 async function runSql(st, msg, sql) {
-  if (st.busy) return;
+  if (st.busy || !canRunSql) return;
   if (!st.sessionId) { st.messages.push({ role: 'error', text: 'この付箋にはまだセッションがありません。' }); return renderSticky(st); }
   msg.ranSql = (msg.ranSql || []).concat([sql.trim()]);
   st.messages.push({ role: 'user', text: autoRun ? 'このSQLを実行（メインと同じく確認なし）' : 'このSQLを承認して実行' });
@@ -439,7 +448,7 @@ function renderSticky(st, skipWires) {
     return finish();
   }
   st.messages.forEach((m) => body.append(renderMessage(st, m)));
-  if (st.busy) body.append(el('div', 'msg thinking', 'Claudeが考えています…'));
+  if (st.busy) body.append(el('div', 'msg thinking', `${agentLabel}が考えています…`));
   box.append(body);
 
   // 入力欄
@@ -516,7 +525,7 @@ function renderMessage(st, m) {
   wrap.append(div);
 
   if (m.kind === 'result') {
-    wrap.append(el('div', 'source-line', `出典：Claudeが取得した結果（${m.at} に${m.auto ? '実行' : '承認して実行'}）。グラフの値は結果の表から描いています。`));
+    wrap.append(el('div', 'source-line', `出典：${agentLabel}が取得した結果（${m.at} に${m.auto ? '実行' : '承認して実行'}）。グラフの値は結果の表から描いています。`));
   }
 
   // 「本筋への影響：」を見つけたら目立たせる
@@ -537,10 +546,13 @@ function sqlBox(st, m, sql, pre) {
   const ran = (m.ranSql || []).includes(sql.trim()) || m.kind === 'result';
   const box = el('div', 'sql-box' + (ran ? ' ran' : ''));
   const head = el('div', 'sql-head');
-  head.append(el('span', null, ran ? '実行したSQL' : (autoRun ? '提案されたSQL（まもなく実行します）' : '提案されたSQL（まだ実行していません）')));
+  const label = !canRunSql ? '提案されたSQL（この環境では実行しません）'
+    : ran ? '実行したSQL'
+    : (autoRun ? '提案されたSQL（まもなく実行します）' : '提案されたSQL（まだ実行していません）');
+  head.append(el('span', null, label));
   head.append(el('span', 'spacer'));
   const code = pre.querySelector('code');
-  if (!ran) {
+  if (!ran && canRunSql) {
     const edit = el('button', 'btn-mini', '直す');
     edit.onclick = () => {
       const on = code.getAttribute('contenteditable') === 'true';
@@ -907,8 +919,9 @@ async function finishWith(text) {
   $('#done').hidden = false;
 }
 $('#btn-ret-send').onclick = () => {
-  const t = $('#ret-text').value.trim();
-  if (!t && !confirm('返す文が空です。何も返さずに閉じますか？')) return;
+  // 選んだ文はそのまま送る（空白の調整はサーバー側の約束に任せる）
+  const t = $('#ret-text').value;
+  if (!t.trim() && !confirm('返す文が空です。何も返さずに閉じますか？')) return;
   finishWith(t);
 };
 $('#btn-ret-none').onclick = () => { if (confirm('何も返さずに閉じますか？付箋はすべて破棄されます。')) finishWith(''); };

@@ -39,6 +39,48 @@ bash install.sh
 
 `~/.claude/skills/understand/` にコピーされます。Claude Code を開き直すと `/understand` が使えます。
 
+### Codex でも使う（実験的）
+
+この機能はまだフォークのブランチにあります。元のリポジトリ（fkubota/understand-mode）には含まれないので、フォークのこのブランチをチェックしてください（マージ後はフォークの main でよいです）。
+
+```bash
+git clone --branch yok-31/codex-runtime https://github.com/kinmokusei317/understand-mode.git
+cd understand-mode
+bash install.sh --codex
+```
+
+`~/.agents/skills/understand/` にコピーされます。Codex の会話の中で `$understand` と明示して呼びます（暗黙には起動しません）。
+
+必要なもの：
+
+- Codex CLI `codex-cli 0.171.0`（この版でだけ動作を確認しています）。版の確認は最初の質問・下書きの直前に行い、違う版ではその質問だけを断ります（サーバーの起動自体は続きます）
+- 親の会話が、従来のローカル記録（`$CODEX_HOME/sessions/` 以下の `rollout-...-<会話ID>.jsonl`）にあること。分割された履歴・動的ツールを持つ記録・OpenAI 以外のプロバイダの会話には対応していません
+- Node.js 18 以上
+
+認証：寄り道のCodexは、親とは別の専用の保管庫（CODEX_HOME）の中で動きます。親の `auth.json` や設定は一切コピーしません。寄り道には、このボード専用の OpenAI キーを `CODEX_API_KEY` に入れておくのが基本のやり方です（`CODEX_ACCESS_TOKEN` は個人のログイントークンを渡す口で、使い分けが必要なときだけ使います）。親のログインとは別物で、キーは質問文やプロンプトに書き込まれませんし、質問文に秘密を書かないでください。寄り道では、選んだ親の会話の記録を OpenAI のエンドポイントに送って回答をもらいます。その送信をこの専用の認証で行うことに同意できるときだけ使ってください。認証が足りなければ Codex CLI がその旨で失敗するので、アプリ側は事前に何も確認しません。
+
+モデル：指定しなければ、このボードの新しいプロファイル（クリーンな CODEX_HOME）の既定で動きます。親の会話の設定は引き継ぎません。変えたいときはサーバー起動時に `--model <名前>` を付けます。
+
+制約：
+
+- 付箋のCodexは読み取り専用（read-only サンドボックス、承認要求なし）で動きます。**SQLは提案までで、実行しません**
+- 親の会話の記録は、専用の保管庫に1本だけ写してから分岐します。閉じると寄り道で作った子の記録はまるごと消え、親と無関係な会話は残ります
+- この機能は「読んで理解する」用途に絞っています。ツールを閉じる指定の実効性や実機での継承は、`docs/codex-port.md` の実機ゲートで確認する段階です
+
+#### サンドボックスで起動できないとき
+
+Codex のサンドボックス（macOS の workspace-write など）の中では、ローカルにサーバーを立てる `listen` が権限不足（EPERM）で失敗することが確認されています。その場合、スキルは権限を広げず、同じユーザーのローカル端末で実行するコマンドを案内します。`CODEX_THREAD_ID` はあなたの端末では空なので、案内されるコマンドにはその会話の ID が直接書かれています。形は次のとおりです（パスと ID は案内どおりに）。
+
+```bash
+DIR=$(mktemp -d)
+cp '/path/to/file.md' "$DIR/main.md"
+node '/path/to/installed/understand/app/server.js' \
+  --backend codex --session '<この会話のUUID>' --cwd "$PWD" --dir "$DIR" --no-open
+# url.txt に出る合言葉つき URL をブラウザで開く
+```
+
+`--dir`（ボードの作業場所）は、リポジトリの外の信頼できる場所に置いてください。親の `CODEX_HOME` が標準以外なら、手動起動の端末でも同じ値を指定します。これは親記録の読取り元であり、付箋用の認証先ではありません。
+
 ## 使い方
 
 1. Claude Code で調査や実装をしてもらう
