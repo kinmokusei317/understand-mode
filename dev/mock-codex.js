@@ -94,6 +94,11 @@ function findRollout(id) {
   return hits[0] || null;
 }
 function writeRollout(id, line) {
+  const existing = findRollout(id);
+  if (existing) {
+    fs.appendFileSync(existing, JSON.stringify(line) + '\n');
+    return existing;
+  }
   const now = new Date();
   const dir = path.join(CODEX_HOME, 'sessions',
     String(now.getFullYear()), String(now.getMonth() + 1).padStart(2, '0'), String(now.getDate()).padStart(2, '0'));
@@ -121,19 +126,43 @@ function die(msg, code) {
 }
 
 (async () => {
+  if (argv.includes('--version')) {
+    console.log('codex-cli 0.171.0');
+    return;
+  }
+  if (argv.includes('mcp') && argv.includes('list')) {
+    if (loadStore().mcpWarning) process.stderr.write('MCP authentication failed (test fixture)\n');
+    console.log('[]');
+    return;
+  }
   const { sub, session, prompt } = parse();
   const input = prompt === '-' ? await readStdin() : (prompt || '');
 
   if (LOG) {
-    try { fs.appendFileSync(LOG, JSON.stringify({ argv, stdin: input, cwd: process.cwd() }) + '\n'); } catch (_) {}
+    try { fs.appendFileSync(LOG, JSON.stringify({ argv, stdin: input, cwd: process.cwd(), home: CODEX_HOME }) + '\n'); } catch (_) {}
   }
 
   const behave = (input.match(/behave:(\w+)/) || [])[1] || process.env.MOCK_CODEX_BEHAVE || '';
-  if (behave === 'exit1') die('mock-codex: 失敗の仕込み（exit1）');
-  if (behave === 'garbage') { process.stdout.write('this is not jsonl\n'); process.exit(0); }
-  if (behave === 'truncated') { emit([{ type: 'thread.started', thread_id: crypto.randomUUID() }, { type: 'turn.started' }]); process.exit(0); }
-  if (behave === 'turnfail') { emit([{ type: 'thread.started', thread_id: crypto.randomUUID() }, { type: 'turn.started' }, { type: 'turn.failed', error: { message: 'boom' } }]); process.exit(1); }
+  if (behave === 'exit1') { result(session, 'partial'); die('mock-codex: 失敗の仕込み（exit1）'); }
+  if (behave === 'garbage') { process.stdout.write('this is not jsonl\n'); result(session, 'partial'); return; }
+  if (behave === 'truncated') {
+    emit([{ type: 'thread.started', thread_id: session }, { type: 'turn.started' },
+      { type: 'item.completed', item: { type: 'agent_message', text: 'partial' } }]);
+    return;
+  }
+  if (behave === 'turnfail') {
+    // Other than the failure event this looks like a successful exec (even exits zero).
+    emit([{ type: 'thread.started', thread_id: session }, { type: 'turn.started' },
+      { type: 'item.completed', item: { type: 'agent_message', text: 'partial' } },
+      { type: 'turn.failed', error: { message: 'boom' } }, { type: 'turn.completed' }]);
+    return;
+  }
   if (behave === 'nofork' && sub === 'fork') die("error: unrecognized subcommand 'fork'", 2);
+  if (behave === 'parentid' && sub === 'fork') { result(session, 'invalid fork'); return; }
+  if (behave === 'collision' && sub === 'fork') {
+    result(input.match(/report:([0-9a-f-]{36})/)[1], 'invalid fork');
+    return;
+  }
   if (behave === 'hang') { setTimeout(() => {}, 60 * 1000); return; }
 
   const ephemeral = argv.includes('--ephemeral');

@@ -10,6 +10,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const { spawn, spawnSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
@@ -41,8 +42,9 @@ function rolloutPath(id) {
   return path.join(dir, `rollout-2026-01-01T00-00-00-${id}.jsonl`);
 }
 function seed() {
-  fs.writeFileSync(rolloutPath(P), JSON.stringify({ type: 'seed' }) + '\n');
-  fs.writeFileSync(rolloutPath(F), JSON.stringify({ type: 'seed' }) + '\n');
+  for (const id of [P, F]) {
+    fs.writeFileSync(rolloutPath(id), JSON.stringify({ type: 'session_meta', payload: { id, model_provider: 'openai' } }) + '\n');
+  }
   fs.writeFileSync(STORE, JSON.stringify({ threads: {
     [P]: { facts: { P_SECRET }, turns: 1 },
     [F]: { facts: { F_FACT: 'foreign' }, turns: 1 },
@@ -119,9 +121,9 @@ const post = (s, route, body) =>
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 偽 codex を直接動かして、記録器が正しいことを先に確かめる（陽性対照）
-function mockDirect(argv2, input) {
+function mockDirect(argv2, input, home = CODEX_HOME) {
   return spawnSync(process.execPath, [MOCK].concat(argv2), {
-    input: input || '', env: Object.assign({}, process.env, { CODEX_HOME, MOCK_CODEX_STORE: STORE }),
+    input: input || '', env: Object.assign({}, process.env, { CODEX_HOME: home, MOCK_CODEX_STORE: STORE }),
     encoding: 'utf8', timeout: 10000,
   });
 }
@@ -166,7 +168,13 @@ function mockDirect(argv2, input) {
 
   const s = await startServer();
   const parentRollout = fs.readFileSync(rolloutPath(P), 'utf8');
-  let C, D, E;
+  let C, D, E, recovery, boardHome;
+  function checkCall(name, before, op, source, marker) {
+    const calls = readLog().slice(before);
+    const call = calls[0];
+    ok(name, calls.length === 1 && call.argv[0] === 'exec' &&
+      positional(call.argv).join(' ') === [op, source, '-'].join(' ') && call.stdin.includes(marker), JSON.stringify(calls));
+  }
 
   console.log('\n2. 付箋の初回は親から fork で分岐し、親の文脈を引き継ぐ');
   {
@@ -177,6 +185,7 @@ function mockDirect(argv2, input) {
     C = r.sessionId;
     ok('新しい子のIDが返る（親ではない）', !!C && C !== P, `sessionId=${C}`);
     const d = readLog().slice(before).pop() || { argv: [] };
+    boardHome = d.home;
     const pos = positional(d.argv);
     ok('codex exec fork <親> を呼んでいる', pos[0] === 'fork' && pos[1] === P, d.argv.join(' '));
     ok('JSONL で起動している（--json）', d.argv.includes('--json'), d.argv.join(' '));
@@ -227,16 +236,33 @@ function mockDirect(argv2, input) {
       ['turn の失敗イベント', 'behave:turnfail'],
     ];
     for (const [name, trick] of cases) {
+      const before = readLog().length;
       const r = await post(s, '/api/ask', { followUp: trick, sessionId: C, continueSession: true });
       ok(`${name} → ok:false`, r.ok === false, JSON.stringify(r));
+      checkCall(`${name}の仕込みを指定の子で実行`, before, 'resume', C, trick);
     }
+    let before = readLog().length;
     const r = await post(s, '/api/ask', { followUp: 'behave:wrongid ask:P_SECRET', sessionId: C, continueSession: true });
     ok('resume で別IDが返った → ok:false（ID不整合）', r.ok === false, JSON.stringify(r));
+    checkCall('別IDの仕込みは resume で実行', before, 'resume', C, 'behave:wrongid');
+    before = readLog().length;
     const r2 = await post(s, '/api/ask', { action: 'question', anchor: 'x', question: 'behave:nofork ask:P_SECRET', sessionId: P });
     ok('fork 非対応のCodex → ok:false（互換と称して親を汚さない）', r2.ok === false, JSON.stringify(r2));
+    checkCall('非対応の仕込みは fork で実行し、代替しない', before, 'fork', P, 'behave:nofork');
     const r3 = await post(s, '/api/ask', { action: 'question', anchor: 'x', question: 'ask:P_SECRET', sessionId: P });
     ok('失敗のあとも普通の質問は通る', r3.ok === true, r3.error);
+    recovery = r3.sessionId;
     ok('親の会話履歴はそれでも変わっていない', fs.readFileSync(rolloutPath(P), 'utf8') === parentRollout);
+    before = readLog().length;
+    for (const [sessionId, continueSession] of [[P, true], [F, true], [F, false]]) {
+      const denied = await post(s, '/api/ask', { sessionId, continueSession, question: 'ask:X' });
+      ok(`所有外の ${continueSession ? 'resume' : 'fork'} を拒否`, denied.ok === false);
+    }
+    ok('越権した枝指定はバックエンドに届かない', readLog().length === before);
+    for (const collision of [P, E]) {
+      const invalid = await post(s, '/api/ask', { sessionId: C, question: `behave:collision report:${collision}` });
+      ok('子付箋の新規IDとして親や兄弟を受理しない', invalid.ok === false && !invalid.sessionId);
+    }
   }
 
   console.log('\n6. どの呼び出しも、権限を拡大せず「一番新しい会話」を推測しない');
@@ -263,22 +289,32 @@ function mockDirect(argv2, input) {
   console.log('\n8. /api/draft は親の履歴を引き継がない新規実行');
   {
     const before = readLog().length;
-    const r = await post(s, '/api/draft', { notes: '影響ありのメモ' });
+    const r = await post(s, '/api/draft', { notes: '影響ありのメモ ask:P_SECRET' });
     ok('下書きが返る', r.ok === true && !!(r.text || '').length, JSON.stringify(r));
+    ok('下書きは親の秘密を知らない', (r.text || '').includes('P_SECRET=UNKNOWN'));
     const d = readLog().slice(before).pop() || { argv: [] };
     const pos = positional(d.argv);
     ok('fork/resume を呼んでいない', pos[0] !== 'fork' && pos[0] !== 'resume', d.argv.join(' '));
     ok('親や付箋のIDを渡していない', ![P, C, D, E, F].filter(Boolean).some((id) => d.argv.includes(id)), d.argv.join(' '));
     ok('下書きでも権限を広げていない', permissionNotes(d.argv).length === 0, permissionNotes(d.argv).join(' / '));
+    const state = JSON.parse(fs.readFileSync(STORE, 'utf8'));
+    fs.writeFileSync(STORE, JSON.stringify({ ...state, mcpWarning: true }));
+    const checkpoint = readLog().length;
+    const refused = await post(s, '/api/draft', { notes: 'MCP authentication failure' });
+    ok('MCP 確認が exit 0 でも認証エラーならモデルを呼ばない', refused.ok === false && readLog().length === checkpoint);
+    fs.writeFileSync(STORE, JSON.stringify(state));
   }
 
   console.log('\n9. タイムアウトは成功にしない');
   {
     const s2 = await startServer({ timeoutSec: '2' });
     const t0 = Date.now();
+    const before = readLog().length;
     const r = await post(s2, '/api/ask', { action: 'question', anchor: 'x', question: 'behave:hang', sessionId: P });
     ok('応答しない呼出し → ok:false', r.ok === false, JSON.stringify(r));
-    ok('待ちすぎずに返る（20秒以内）', Date.now() - t0 < 20000, `${Date.now() - t0}ms`);
+    checkCall('hang の仕込みまで到達', before, 'fork', P, 'behave:hang');
+    const elapsed = Date.now() - t0;
+    ok('2秒タイマーで終了し即時解析失敗ではない', elapsed >= 1800 && elapsed < 20000, `${elapsed}ms`);
     s2.stop();
   }
 
@@ -293,22 +329,37 @@ function mockDirect(argv2, input) {
     s3.stop();
   }
 
+  {
+    const unused = await startServer();
+    const before = readLog().length;
+    await post(unused, '/api/return', { text: '' });
+    const late = await post(unused, '/api/draft', { notes: 'closed' }).catch(() => ({ ok: false }));
+    ok('未使用のボードも終了後に新しい子を開始しない', late.ok === false && readLog().length === before);
+    unused.stop();
+  }
+
   console.log('\n11. 「選んだ文だけ」が return.md に戻り、所有する子だけが消える');
   {
-    const children = [C, D, E].filter(Boolean);
-    const r = await post(s, '/api/return', { text: 'イベントだけでは説明できない、と伝えたい' });
+    const children = [C, D, E, recovery].filter(Boolean);
+    ok('後片付け対象は失敗後の復旧を含む異なる子4件', children.length === 4 && new Set(children).size === 4);
+    for (const id of children) {
+      ok(`終了前に子 ${id.slice(0, 8)}… の記録が存在`, !!boardHome && !!findFile(boardHome, `-${id}.jsonl`));
+    }
+    const selected = '  イベントだけでは説明できない、と伝えたい  ';
+    const r = await post(s, '/api/return', { text: selected });
     ok('return が通る', r.ok === true, JSON.stringify(r));
     const ret = fs.readFileSync(path.join(s.dir, 'return.md'), 'utf8');
-    ok('return.md は選んだ文そのまま', ret === 'イベントだけでは説明できない、と伝えたい\n', JSON.stringify(ret));
+    ok('return.md は選んだ文そのまま', ret === selected + '\n', JSON.stringify(ret));
     await wait(1200); // サーバーの後片付けと終了を待つ
     ok('親の記録は残る', fs.existsSync(rolloutPath(P)));
     ok('無関係な枝の記録は残る', fs.existsSync(rolloutPath(F)));
     for (const id of children) {
       ok(`作った子 ${id.slice(0, 8)}… の記録は消える`, !findFile(CODEX_HOME, `-${id}.jsonl`));
+      ok(`実際の呼出し先でも ${id.slice(0, 8)}… の記録は消える`, !findFile(boardHome, `-${id}.jsonl`));
     }
     // 消えた子は resume できず、残った親と無関係な枝は resume できる（実機ゲートDの契約側）
     for (const id of children) {
-      const rr = mockDirect(['exec', '--json', 'resume', id, '-'], 'ask:X');
+      const rr = mockDirect(['exec', '--json', 'resume', id, '-'], 'ask:X', boardHome);
       ok(`消えた子は resume できない (${id.slice(0, 8)}…)`, rr.status !== 0, rr.stdout.slice(0, 120));
     }
     ok('親はいまも resume できる', mockDirect(['exec', '--json', 'resume', P, '-'], 'ask:X').status === 0);
