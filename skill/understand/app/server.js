@@ -13,10 +13,18 @@ const { spawn, execFile } = require('child_process');
 
 // ---------- 引数と設定 ----------
 const args = parseArgs(process.argv.slice(2));
+const BACKEND = args.backend || 'claude';
+if (!['claude', 'codex'].includes(BACKEND)) {
+  console.error('--backend must be claude or codex'); process.exit(1);
+}
+if (BACKEND === 'codex' && (typeof args.session !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args.session))) {
+  console.error('Codex requires an explicit --session UUID (never --last).'); process.exit(1);
+}
 const WORK_DIR = path.resolve(args.dir || fs.mkdtempSync(path.join(os.tmpdir(), 'understand-')));
 const PROJECT_CWD = path.resolve(args.cwd || process.cwd());
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const CLAUDE_BIN = process.env.UNDERSTAND_CLAUDE_BIN || 'claude';
+const CODEX_BIN = process.env.UNDERSTAND_CODEX_BIN || 'codex';
 
 // このサーバーは誰でも叩ける場所（127.0.0.1）にいる。同じマシンの別のページや別のプロセスから
 // 勝手に操作されないよう、起動ごとに合言葉を作る。URLに載せてブラウザに渡し、APIでは毎回照合する。
@@ -36,11 +44,11 @@ const FORK_EFFORT = 'low';
 const ASK_DISALLOWED = ['Edit', 'Write', 'NotebookEdit', 'Bash'];
 // 承認して実行するときも、編集だけは禁じる。許可は足さない（その人の普段の許可に従う）
 const RUN_DISALLOWED = ['Edit', 'Write', 'NotebookEdit'];
-let mainSessionId = (args.session && !args.session.includes('${')) ? args.session : findLatestSession(PROJECT_CWD);
+let mainSessionId = BACKEND === 'codex' ? args.session : (args.session && !args.session.includes('${')) ? args.session : findLatestSession(PROJECT_CWD);
 // claude --resume は、実行時のカレントディレクトリでセッションを探す。
 // 渡された --cwd がずれていても動くように、セッションの記録から本当のcwdを拾う。
-const SPAWN_CWD = cwdOfSession(mainSessionId) || PROJECT_CWD;
-const MAIN_MODE = permissionModeOf(mainSessionId);
+const SPAWN_CWD = BACKEND === 'codex' ? PROJECT_CWD : cwdOfSession(mainSessionId) || PROJECT_CWD;
+const MAIN_MODE = BACKEND === 'codex' ? null : permissionModeOf(mainSessionId);
 // メインが確認なしで動いているなら、アプリも承認ボタンを挟まない
 const AUTO_RUN = MAIN_MODE === 'bypassPermissions';
 
@@ -117,6 +125,7 @@ function findLatestSession(cwd) {
 // 「理解したらログは捨てる」方針なので、このアプリが分岐で作ったセッションの記録だけを削除する（メインには触れない）
 const createdSessions = new Set();
 function cleanupForkedSessions() {
+  if (BACKEND === 'codex') return; // Codex owns its session database and logs; never delete them.
   const dir = path.join(os.homedir(), '.claude', 'projects', SPAWN_CWD.replace(/[^A-Za-z0-9]/g, '-'));
   for (const id of createdSessions) {
     if (!/^[0-9a-f-]{36}$/.test(id) || id === mainSessionId) continue;
@@ -226,6 +235,46 @@ function runClaude({ prompt, resume, fork, allowedTools, disallowedTools, append
   });
 }
 
+// Codex resumes only forks created in this server's lifetime, never the selected original.
+const codexSessions = new Set();
+function runCodex({ prompt, resume, fork, appendSystem }) {
+  return new Promise(resolve => {
+    const cmd = ['exec', '--sandbox', 'read-only', '--ignore-user-config', '--json', '--skip-git-repo-check',
+      '--disable', 'shell_tool', '--disable', 'apps', '--disable', 'hooks', '--disable', 'plugins',
+      '--disable', 'browser_use', '--disable', 'computer_use', '--disable', 'multi_agent'];
+    if (resume) cmd.push(fork ? 'fork' : 'resume', resume, '-');
+    else cmd.push('--ephemeral', '-');
+    const child = spawn(CODEX_BIN, cmd, { cwd: SPAWN_CWD, env: process.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '', timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, TIMEOUT_SEC * 1000);
+    child.stdout.on('data', d => { stdout += d; });
+    child.stderr.on('data', d => { stderr += d; });
+    child.stdin.on('error', () => {});
+    child.stdin.end([appendSystem, prompt].filter(Boolean).join('\n\n'));
+    child.on('error', err => { clearTimeout(timer); resolve({ ok: false, error: `Codexを起動できませんでした: ${err.message}` }); });
+    child.on('close', code => {
+      clearTimeout(timer);
+      if (timedOut || code !== 0) return resolve({ ok: false, error: `Codexが失敗しました（${timedOut ? 'タイムアウト' : `終了コード ${code}`}）\n${stderr.slice(0, 800)}` });
+      let id, text = '', completed = false, failure = '';
+      try {
+        for (const line of stdout.split('\n').filter(Boolean)) {
+          const event = JSON.parse(line);
+          if (event.type === 'thread.started') id = event.thread_id;
+          if (event.type === 'item.completed' && event.item?.type === 'agent_message') text = event.item.text || '';
+          if (event.type === 'turn.completed') completed = true;
+          if (event.type === 'turn.failed' || event.type === 'error') failure = event.error?.message || event.message || 'Codexエラー';
+        }
+      } catch (_) { return resolve({ ok: false, error: 'CodexのJSONL応答を読めませんでした。' }); }
+      if (failure || !completed || typeof id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id) || (resume && ((!fork && id !== resume) || (fork && (id.toLowerCase() === resume.toLowerCase() || id.toLowerCase() === mainSessionId.toLowerCase() || codexSessions.has(id)))))) {
+        return resolve({ ok: false, error: failure || 'Codexのセッションまたは応答を確認できませんでした。' });
+      }
+      if (resume && fork) codexSessions.add(id);
+      resolve({ ok: true, text, sessionId: id });
+    });
+  });
+}
+const runBackend = opts => BACKEND === 'codex' ? runCodex(opts) : runClaude(opts);
+
 // ---------- HTTP ----------
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 
@@ -267,26 +316,30 @@ const server = http.createServer(async (req, res) => {
       const markdown = fs.existsSync(mdPath) ? fs.readFileSync(mdPath, 'utf8') : '# 本筋がありません\n\nmain.md が見つかりませんでした。';
       let title = '';
       try { title = fs.readFileSync(path.join(WORK_DIR, 'title.txt'), 'utf8').trim(); } catch (_) {}
-      return send(res, 200, { markdown, title, hasSession: !!mainSessionId, project: path.basename(PROJECT_CWD), autoRun: AUTO_RUN });
+      return send(res, 200, { markdown, title, hasSession: !!mainSessionId, project: path.basename(PROJECT_CWD), autoRun: AUTO_RUN, backend: BACKEND, sqlEnabled: BACKEND !== 'codex' });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/ask') {
       const b = await readBody(req);
       if (!mainSessionId && !b.sessionId) return send(res, 200, { ok: false, error: 'メインのセッションが見つかりません。スキルからもう一度起動してください。' });
+      if (BACKEND === 'codex' && ((b.continueSession && !codexSessions.has(b.sessionId)) || (!b.continueSession && b.sessionId && !codexSessions.has(b.sessionId)))) {
+        return send(res, 200, { ok: false, error: 'このアプリが作成したCodexセッションだけを続行・分岐できます。' });
+      }
       const make = ACTION_PROMPTS[b.action] || ACTION_PROMPTS.question;
       const prompt = b.followUp ? b.followUp : make(b.anchor || '', b.question);
-      const result = await runClaude({
+      const result = await runBackend({
         prompt,
         resume: b.sessionId || mainSessionId,
         // 付箋の最初の質問は親（本筋 or 親の付箋）から分岐する。続きの質問はその付箋のセッションに積む
         fork: !b.continueSession,
-        appendSystem: SYSTEM_APPEND,
+        appendSystem: BACKEND === 'codex' ? SYSTEM_APPEND.replace(/Claude/g, 'Codex') + '\nSQLは提案のみで、承認後も実行しないでください。' : SYSTEM_APPEND,
         disallowedTools: ASK_DISALLOWED,
       });
       return send(res, 200, result);
     }
 
     if (req.method === 'POST' && url.pathname === '/api/runsql') {
+      if (BACKEND === 'codex') return send(res, 200, { ok: false, error: 'CodexではSQLの実行は無効です。' });
       const b = await readBody(req);
       const checked = checkSql(b.sql);
       if (checked.error) return send(res, 200, { ok: false, error: checked.error });
@@ -319,13 +372,13 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/draft') {
       const b = await readBody(req);
       const prompt = [
-        '以下は、ユーザーがClaudeの出力（本筋）を理解する過程で「本筋に影響あり」とした寄り道のメモです。',
-        'これをもとに、メインの作業セッションのClaudeに返す短いメッセージを、ユーザーの一人称で下書きしてください。',
+        `以下は、ユーザーが${BACKEND === 'codex' ? 'Codex' : 'Claude'}の出力（本筋）を理解する過程で「本筋に影響あり」とした寄り道のメモです。`,
+        `これをもとに、メインの作業セッションの${BACKEND === 'codex' ? 'Codex' : 'Claude'}に返す短いメッセージを、ユーザーの一人称で下書きしてください。`,
         '形式：1行目に理解できたことを一言、その後に本筋に反映してほしい点を番号付きで。各点は根拠を一文添える。全体で8行以内。前置きや説明は書かず、メッセージ本文だけを出力すること。',
         '',
         b.notes || '',
       ].join('\n');
-      const result = await runClaude({ prompt, disallowedTools: ASK_DISALLOWED });
+      const result = await runBackend({ prompt, disallowedTools: ASK_DISALLOWED });
       return send(res, 200, result);
     }
 
@@ -355,6 +408,7 @@ server.listen(Number(args.port || 0), '127.0.0.1', () => {
   fs.writeFileSync(path.join(WORK_DIR, 'url.txt'), url + '\n');
   fs.writeFileSync(path.join(WORK_DIR, 'server.pid'), String(process.pid));
   console.log(`understand-mode: ${url}`);
+  console.log(`backend: ${BACKEND}`);
   console.log(`作業フォルダ: ${WORK_DIR}`);
   console.log(`メインのセッション: ${mainSessionId || '(見つかりません)'}`);
   console.log(`分身を動かす場所: ${SPAWN_CWD}`);

@@ -27,6 +27,8 @@ Claude Code の出力を、付箋のホワイトボードで寄り道しなが�
 
 追加の npm パッケージは不要です。図とグラフのライブラリは同梱しています（ネット接続がなくても描画できます）。
 
+Claude 向けの既定動作とは別に、明示的な選択による実験的な Codex バックエンドもあります。手動起動と制限は下記を参照してください。
+
 動作を確認しているのは macOS と Linux です。Windows では試していません。
 
 ## インストール
@@ -71,7 +73,31 @@ bash install.sh
 
 変えられるのは待ち時間だけです。重い調べものに時間がかかるようなら、`UNDERSTAND_TIMEOUT_SEC=600` のように環境変数で伸ばせます（既定は300秒）。
 
-## しくみ
+## Codex バックエンド（手動・実験的）
+
+Node.js 18 以上とログイン済みの Codex CLI が必要です。`codex exec fork` / `resume` と JSONL 出力を使います。CLI 0.171.0 で実アカウントを使い、専用テスト会話からの fork、文脈の引き継ぎ、付箋の続きの resume、終了時の返却を確認しました。T3Code 連携は未検証で、T3Code の会話を直接扱う機能はありません。
+
+1. **本人が対象の Codex セッション UUID を確認して選びます。** 例えば起動元が `CODEX_THREAD_ID` を公開する場合、それが対象の UUID か確認できます。環境によっては使えません。名前や `--last` は受け付けず、最新セッションも自動選択しません。
+2. 対象のプロジェクトを作業ディレクトリとし、表示する Markdown を用意して起動します（以下の `/path/to/understand-mode` と UUID、入力ファイルは自分の値に置換）。
+
+   ```bash
+   DIR=$(mktemp -d)
+   cp /path/to/explanation.md "$DIR/main.md"
+   node /path/to/understand-mode/skill/understand/app/server.js \
+     --backend codex --session '00000000-0000-4000-8000-000000000000' \
+     --cwd "$PWD" --dir "$DIR" --no-open > "$DIR/server.log" 2>&1 &
+   # 起動後に cat "$DIR/url.txt" でURLを確認してブラウザで開く
+   ```
+
+   `url.txt` ができなければ `server.log` を確認してください。URLには秘密のトークンが含まれます。`--no-open` を省けばブラウザを開きます。実行環境のタイムアウトは `UNDERSTAND_TIMEOUT_SEC` で変更できます。
+3. 質問は選択した本筋から **fork** し、続きはアプリが作成した付箋セッションだけを **resume** します。子付箋も親から fork します。元のセッションは resume しません。サーバー再起動後は以前の付箋の続行はできません。
+4. 終了時の `return.md` はユーザーが選んだ内容を含む未検証のテキストです。自動実行せず、内容を確認してから本筋に手動で戻してください。
+
+Codex ではSQLの実行ボタンと API を無効にし、SQLは提案のみです。`read-only` サンドボックスに加え、シェル、アプリ、フック等を CLI の機能フラグで無効化し、ユーザー設定を読みません。そのため通常のモデル・プロバイダー設定が引き継がれず、コードを追加で読めない場合があります。サンドボックスはネットワークや MCP に対する一般的な遮断保証ではなく、管理者設定・Codex のバージョンや他のツールの影響もありえます。外部操作を禁止する必要がある環境では、別途ネットワーク・権限を制限してください。これらのフラグの動作や設定の重なりを含む完全な安全性は検証していません。
+
+Codex の fork は Codex 自身のセッション記録を残します。アプリはそれらを削除しません（失敗時の途中記録を含む）。終了時に作業ディレクトリの `main.md`、`return.md` なども残るので、内容を確認し不要なら本人が削除してください。Claude 向け `/understand` のインストールは Codex の `$understand` や `/skills` への登録ではありません。この手順は手動起動であり、Codex スキルの自動登録は行いません。
+
+## しくみ（Claude）
 
 - 質問のたびに `claude -p --resume <メインのセッション> --fork-session` を実行します。メインの文脈を引き継いだ分身が答えるので、メインの会話は汚れません
 - 付箋の続きの質問はその付箋のセッションに、子付箋は親の付箋のセッションから分岐します
@@ -103,6 +129,7 @@ rm -rf ~/.claude/skills/understand
 ```bash
 npm run mock       # 偽の claude で起動（費用ゼロ）
 npm run test:sql   # SQL実行まわりの確認（ClaudeもDBも使わない）
+npm run test:codex # モック Codex CLI と HTTP API の確認
 npm i && npm run test:e2e   # mock を動かしたまま、画面を一通り自動操作
 ```
 

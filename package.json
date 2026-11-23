@@ -7,6 +7,7 @@
     "mock": "bash dev/run-mock.sh",
     "test:e2e": "node dev/e2e.js",
     "test:sql": "node dev/test-sql.js",
+    "test:codex": "node dev/test-codex.js",
     "link": "bash dev/link-skill.sh",
     "pr-demo": "bash dev/make-pr-demo.sh",
     "test:figures": "node dev/test-figures.js"

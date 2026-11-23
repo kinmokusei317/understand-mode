@@ -16,6 +16,7 @@ let selCtx = null;
 let mmSeq = 0;
 // メインが確認なしで動いているか。/api/init で届く
 let autoRun = false;
+let sqlEnabled = true;
 
 const board = $('#board'), world = $('#world'), wires = $('#wires');
 const mainCard = $('#main-card'), mainBody = $('#main-body');
@@ -70,6 +71,7 @@ async function init() {
     }
   });
   autoRun = !!data.autoRun;
+  sqlEnabled = data.sqlEnabled !== false;
   $('#project').textContent = data.title || (data.project ? `プロジェクト：${data.project}` : '');
   if (!data.hasSession) $('#project').textContent += '（メインのセッションが見つかりません）';
   restore();
@@ -549,7 +551,8 @@ function sqlBox(st, m, sql, pre) {
       if (!on) code.focus();
     };
     const run = el('button', 'btn-run', '承認して実行');
-    run.disabled = !!st.busy;
+    run.disabled = !!st.busy || !sqlEnabled;
+    if (!sqlEnabled) run.title = 'CodexではSQLを実行できません';
     run.onclick = () => runSql(st, m, code.textContent);
     head.append(edit, run);
   }
