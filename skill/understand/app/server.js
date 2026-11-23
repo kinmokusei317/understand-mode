@@ -79,6 +79,13 @@ const MAIN_MODE = IS_CODEX ? null : permissionModeOf(mainSessionId);
 // メインが確認なしで動いているなら、アプリも承認ボタンを挟まない
 const AUTO_RUN = !IS_CODEX && MAIN_MODE === 'bypassPermissions';
 
+// Codex の寄り道は子をプロセスグループごと始末するので POSIX 専用。
+// Windows では専用の根を作る前に起動をやめる。
+if (IS_CODEX && process.platform === 'win32') {
+  console.error('Codex の寄り道は POSIX（macOS/Linux）のプロセスグループに依存するため、Windows では動かせません。起動をやめます。');
+  process.exit(1);
+}
+
 // ---------- Codex 実行器（Codex のときだけ使う） ----------
 // 親の記録を専用の保管庫に写してから fork し、子は全部ボードの中に閉じ込める。
 // 作るのは最初に必要になったとき（質問・下書きが来たとき）。
@@ -300,12 +307,17 @@ function send(res, status, body, type = 'application/json; charset=utf-8') {
   res.end(typeof body === 'string' || Buffer.isBuffer(body) ? body : JSON.stringify(body));
 }
 
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', c => { data += c; if (data.length > 5e6) req.destroy(); });
-    req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
-  });
+// 本文はバイトのまま貯めてから一度だけデコードする。
+// UTF-8 の文字の途中で区切って読むと、日本語が化けるのでチャンクごとの toString はしない。
+async function readBody(req) {
+  const chunks = [];
+  let bytes = 0;
+  for await (const chunk of req) {
+    bytes += chunk.length;
+    if (bytes > 5e6) throw new Error('本文が大きすぎます');
+    chunks.push(chunk);
+  }
+  return bytes ? JSON.parse(Buffer.concat(chunks, bytes).toString('utf8')) : {};
 }
 
 // 同じマシンの別のページ・別のプロセスからの操作を断る。
@@ -417,12 +429,12 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/api/return') {
       const b = await readBody(req);
       if (IS_CODEX) {
-        // 選んだ文をそのまま返す。要約も置き換えもしない（末尾の改行だけは1つ添える）
+        // 選んだ文をそのまま返す。trim も改行の追加もしない（空白・改行もそのままのバイトで）
         if (codexClosed) return send(res, 200, { ok: false, error: 'このボードはすでに閉じています' });
         const text = typeof b.text === 'string' ? b.text : '';
         // 書き込みに失敗してもボードは閉じない（やり直せるように）
         try {
-          fs.writeFileSync(path.join(WORK_DIR, 'return.md'), text && !text.endsWith('\n') ? text + '\n' : text);
+          fs.writeFileSync(path.join(WORK_DIR, 'return.md'), text, 'utf8');
         } catch (e) {
           return send(res, 200, { ok: false, error: `返す文を書けませんでした: ${e.message}` });
         }

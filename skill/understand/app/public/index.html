@@ -51,6 +51,7 @@
   <button data-action="data">データで確かめる</button>
   <button data-action="review">レビュー</button>
   <button data-action="memo">メモ</button>
+  <button id="btn-sel-return" data-action="return" hidden>選んだ文を返す</button>
 </div>
 
 <div id="return-modal" class="modal-backdrop" hidden>
@@ -69,6 +70,20 @@
       <button id="btn-ret-back" class="btn-outline">ボードに戻る</button>
       <button id="btn-ret-none" class="btn-outline">何も返さず閉じる</button>
       <button id="btn-ret-send" class="btn-primary">メインに送って閉じる</button>
+    </div>
+  </section>
+</div>
+
+<div id="selection-return-modal" class="modal-backdrop" hidden>
+  <section class="modal" role="dialog" aria-labelledby="selret-title">
+    <h1 id="selret-title">選んだ文をそのままメインに返します</h1>
+    <p class="muted">空白や改行を含め、選択したとおりの形で返します。内容を確かめてから送ってください。</p>
+    <div class="row"><label for="selection-preview" class="label">返す文（読み取り専用）</label></div>
+    <textarea id="selection-preview" rows="7" readonly></textarea>
+    <p class="muted small">送ると、付箋と会話はすべて破棄されます。</p>
+    <div class="row end">
+      <button id="btn-selection-back" class="btn-outline">ボードに戻る</button>
+      <button id="btn-selection-send" class="btn-primary">この文を送って閉じる</button>
     </div>
   </section>
 </div>

@@ -3,6 +3,11 @@
 // 親（本筋の会話）の記録を、このボード専用の CODEX_HOME に写してから fork する。
 // 寄り道でできた子の記録はすべてこのボードの中に閉じ込め、終了時にまるごと消す。
 // 親の会話にも、無関係な会話にも、ユーザーが渡した作業フォルダにも触れない。
+//
+// 子プロセスの停止は POSIX のプロセスグループ（detached + kill(-pgid)）が前提。
+// Windows には同じ仕組みがないので、この実行器は macOS/Linux 専用。
+// なお close() が確かめられるのはローカルの CLI プロセスが終わったことだけで、
+// プロバイダ側での課金が止まったことの証明にはならない。
 
 const fs = require('fs');
 const os = require('os');
@@ -56,6 +61,40 @@ function sanitizeStderr(text, prompt) {
     .replace(/Bearer\s+\S+/g, 'Bearer [秘匿]')
     .replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[秘匿]');
   return t.trim().slice(0, 300);
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// プロセスグループの生死を signal 0 で見る。true=消えた確定 / false=まだいる / null=分からない
+// EPERM も「まだいる」と数える：止めた直後はゾンビ（回収待ちの亡骸）が残って
+// 届かないことがあるだけで、グループ自体は確かに存在する。消えたの確定は ESRCH だけ。
+function groupGone(pid) {
+  try { process.kill(-pid, 0); return false; } catch (e) {
+    if (e.code === 'ESRCH') return true;
+    if (e.code === 'EPERM') return false;
+    return null;
+  }
+}
+
+// グループごと即座に止め（TERM→KILL の段階は踏まない）、消えたことを有限時間だけ確かめる。
+// 「消えた」の確定は ESRCH だけ。それ以外の失敗は「分からない」＝未確認として返す。
+// ESRCH を一度見たあとは同じ PGID に二度とシグナルを送らない（再利用された別のPIDを殺さない）。
+async function stopGroup(pid) {
+  if (pid === null) return true; // spawn 自体が失敗していて止める対象がない
+  const first = groupGone(pid);
+  if (first === true) return true;
+  if (first === null) return false; // 観測もできないのに撃っても確かめられない
+  try { process.kill(-pid, 'SIGKILL'); } catch (e) {
+    if (e.code === 'ESRCH') return true;
+    // シグナルの結果だけで停止とせず、グループの消失を確かめる。
+  }
+  const deadline = performance.now() + 3000;
+  for (;;) {
+    const gone = groupGone(pid);
+    if (gone === true) return true;
+    if (performance.now() >= deadline) return false;
+    await sleep(25);
+  }
 }
 
 // codex exec --json の JSONL は、
@@ -200,6 +239,10 @@ function checkRolloutText(text, parentId) {
 }
 
 function createCodex({ parentId, workDir, model, timeoutMs }) {
+  // グループごとの停止が前提なので、POSIX 以外では何も作らず・何も産まずに断る
+  if (process.platform === 'win32') {
+    throw new Error('Codex の寄り道は POSIX（macOS/Linux）のプロセスグループに依存するため、Windows では動かせません');
+  }
   // 親のIDは明示されたものだけ。推測で埋めない（環境変数にも頼らない）
   const parent = typeof parentId === 'string' && UUID.test(parentId) ? parentId : null;
   if (model !== undefined && model !== null && typeof model !== 'string') {
@@ -222,41 +265,77 @@ function createCodex({ parentId, workDir, model, timeoutMs }) {
   const owned = new Set();          // このボードが成功裏に作った子だけ
   let snapshotDone = false;         // 親の記録の写しは、最初の質問の直前に作る
   let versionChecked = false;
-  let active = null;                // 走っている子プロセス（close で止める）
+  let active = null;                // 走っている子の中断関数（close が呼ぶ）
   let closing = false;
   let closePromise = null;
+  let cleanupFailure = null;        // 未確認停止があれば立つ。これ以後は産まず、根も消さない
   let chain = Promise.resolve();    // 子への操作は必ずこの列に並べる
 
   const fail = (msg) => ({ ok: false, error: msg });
   const closed = () => fail('このボードはすでに閉じています');
 
   // codex の子プロセスを1回動かす共通の器。probe・exec どちらもこれを通る。
+  // 子は detached で自分のプロセスグループを持つ。リーダーの exit/close の時点で
+  // 同じグループの残党がいないかを確かめる（PGID の正体が確かなのはその時だけ）。
   // 出力はバイト上限まで Buffer のまま貯め、閉じてから一度だけデコードする
   // （UTF-8 の文字の途中で切って連結すると、日本語が壊れる）。
   function runProcess(argv, input, timeoutMs) {
     return new Promise((resolve) => {
-      const done = (r) => resolve(Object.assign({
-        spawnError: null, code: null, signal: null, timedOut: false,
-        outOverflow: false, stdout: '', stderr: '',
-      }, r));
+      const outChunks = [], errChunks = [];
+      let outLen = 0, errLen = 0, outOverflow = false, timedOut = false, finished = false, cancelled = false;
+      let timer = null;
+      const done = (r) => {
+        if (finished) return;
+        finished = true;
+        if (timer !== null) clearTimeout(timer);
+        if (active === cancel) active = null;
+        resolve(Object.assign({
+          spawnError: null, code: null, signal: null, timedOut,
+          outOverflow, unsafe: false,
+          stdout: Buffer.concat(outChunks).toString('utf8'),
+          stderr: Buffer.concat(errChunks).toString('utf8'),
+        }, r));
+      };
+      const dropPipes = () => {
+        try { child.stdin.destroy(); } catch (_) {}
+        try { child.stdout.destroy(); } catch (_) {}
+        try { child.stderr.destroy(); } catch (_) {}
+      };
+      // 中断：グループを止めて確かめ、管を閉じて一度だけ終わらせる
+      function cancel(extra) {
+        cancelled = true;
+        return verifyGroup().then((ok) => {
+          dropPipes();
+          done(Object.assign(ok ? { signal: 'SIGKILL' } : { unsafe: true }, extra));
+        });
+      }
+      // 停止を一度でも見失ったボードでは、新しい子を産まない
+      if (cleanupFailure) return done({ unsafe: true });
       let child;
       try {
-        child = spawn(bin, argv, { cwd: emptyCwd, env: childEnv(privateHome, privateCodexHome), stdio: ['pipe', 'pipe', 'pipe'] });
+        child = spawn(bin, argv, {
+          detached: true, // 自分をリーダーとする新しいプロセスグループ（unref はしない）
+          cwd: emptyCwd,
+          env: childEnv(privateHome, privateCodexHome),
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
       } catch (e) {
         return done({ spawnError: e.message });
       }
-      active = child;
-      const outChunks = [], errChunks = [];
-      let outLen = 0, errLen = 0, outOverflow = false, timedOut = false;
-      const timer = setTimeout(() => {
-        timedOut = true;
-        try { child.kill('SIGTERM'); } catch (_) {}
-        setTimeout(() => { try { child.kill('SIGKILL'); } catch (_) {} }, 2000);
-      }, timeoutMs);
+      // 触るのはこの spawn が返した正のPIDだけ（名前検索も無関係なPIDも使わない）
+      const pid = typeof child.pid === 'number' && child.pid > 0 ? child.pid : null;
+      // グループへの停止操作は1回だけ。結果（確認済み/未確認）は呼んだ全員で分ける
+      let stopping;
+      const verifyGroup = () => (stopping ||= stopGroup(pid).then((ok) => {
+        if (!ok) cleanupFailure = '子プロセスの停止を確認できませんでした';
+        return ok;
+      }));
+      active = cancel;
+      timer = setTimeout(() => { timedOut = true; cancel(); }, timeoutMs);
       child.stdout.on('data', (d) => {
         if (outOverflow) return;               // 超えたあとは足さない
         outLen += d.length;
-        if (outLen > OUT_LIMIT) { outOverflow = true; child.kill('SIGKILL'); return; }
+        if (outLen > OUT_LIMIT) { outOverflow = true; cancel(); return; }
         outChunks.push(d);
       });
       child.stderr.on('data', (d) => {
@@ -264,20 +343,23 @@ function createCodex({ parentId, workDir, model, timeoutMs }) {
         errLen += d.length;
         errChunks.push(d);
       });
-      child.on('error', (e) => {
-        clearTimeout(timer); active = null;
-        done({ spawnError: e.message, timedOut, outOverflow });
+      child.once('error', (e) => {
+        if (pid === null) { done({ spawnError: e.message }); return; } // 産まれてすらいない
+        cancel({ spawnError: e.message }); // pid があるなら、グループを確かめてからその詳細を報告する
       });
       child.stdin.on('error', () => {});
       if (input != null) child.stdin.write(input);
       child.stdin.end();
-      child.on('close', (code, signal) => {
-        clearTimeout(timer); active = null;
-        done({
-          code, signal, timedOut, outOverflow,
-          stdout: Buffer.concat(outChunks).toString('utf8'),
-          stderr: Buffer.concat(errChunks).toString('utf8'),
+      child.once('exit', () => {
+        // リーダーが死んだ直後の、PGID がまだ確かなうちに残党を確かめる。
+        // 管を手放した子孫が残っていればここで道連れにする。未確認なら待たずに終わらせる
+        verifyGroup().then((ok) => {
+          if (!ok) { dropPipes(); done({ unsafe: true }); }
         });
+      });
+      child.once('close', async (code, signal) => {
+        const ok = await verifyGroup();
+        done(!ok ? { unsafe: true } : cancelled ? { signal: 'SIGKILL' } : { code, signal });
       });
     });
   }
@@ -285,6 +367,7 @@ function createCodex({ parentId, workDir, model, timeoutMs }) {
   // モデルを呼ばない短い確認（--version / mcp list）。失敗はすべて「呼ばない」側に倒す
   async function probe(argv) {
     const r = await runProcess(argv, null, PROBE_TIMEOUT_MS);
+    if (r.unsafe) return { ok: false, error: '子プロセスの停止を確認できませんでした' };
     if (r.spawnError) return { ok: false, error: `Codexを起動できませんでした: ${r.spawnError}` };
     if (r.timedOut) return { ok: false, error: 'Codexの確認が時間内に終わりませんでした' };
     if (r.code !== 0) {
@@ -337,6 +420,7 @@ function createCodex({ parentId, workDir, model, timeoutMs }) {
       '-',
     ];
     const r = await runProcess(argv, prompt, timeout);
+    if (r.unsafe) return fail('子プロセスの停止を確認できませんでした。このボードはもう使えません');
     if (r.spawnError) return fail(`Codexを起動できませんでした: ${r.spawnError}`);
     // 時間切れで殺した子が遅れて正常終了しても、成功にはしない
     if (r.timedOut) return fail(`Codexが時間内に応答しませんでした（${Math.round(timeout / 1000)}秒）。もう一度試してください`);
@@ -436,15 +520,18 @@ function createCodex({ parentId, workDir, model, timeoutMs }) {
     });
   }
 
-  // 閉じる：まず closing を同期で立てて新しい仕事を断り、
-  // 走っている子を止めて並んだ仕事を待ち、それから専用の根をまるごと消す。
-  // 消せなかったときは成功と報告しない。
+  // 閉じる：まず closing を同期で立てて新しい仕事を断り、走っている子を止め、
+  // 並んだ仕事を待ってから専用の根をまるごと消す。
+  // 停止を確認できなかったボードは安全に畳めない：根を残したまま、正直に失敗を返す。
   function close() {
     if (closePromise) return closePromise;
     closing = true;
     closePromise = (async () => {
-      if (active) { try { active.kill('SIGKILL'); } catch (_) {} }
+      if (active) await active();
       await chain.catch(() => {});
+      if (cleanupFailure) {
+        return { ok: false, error: '子プロセスの停止を確認できませんでした。寄り道の記録は残したままです' };
+      }
       let lastError = null;
       for (let attempt = 0; attempt < 2 && fs.existsSync(root); attempt++) {
         try { fs.rmSync(root, { recursive: true, force: true }); } catch (e) { lastError = e; }

@@ -13,6 +13,7 @@ const apiHeaders = { 'Content-Type': 'application/json', 'X-Understand-Token': T
 const S = { stickies: {}, order: [], pan: { x: 40, y: 20 }, zoom: 1, seq: 0, focus: null };
 let pendingCount = 0;
 let selCtx = null;
+let selectedForReturn = null; // Codexの「選んだ文を返す」用。空白・改行を含む選択範囲そのまま（保存はしない）
 let mmSeq = 0;
 // メインが確認なしで動いているか。/api/init で届く
 let autoRun = false;
@@ -20,6 +21,7 @@ let autoRun = false;
 let canRunSql = true;
 // 応答してくれる側の呼び名（Claude / Codex）。表示だけに使う
 let agentLabel = 'Claude';
+let isCodex = false;
 
 const board = $('#board'), world = $('#world'), wires = $('#wires');
 const mainCard = $('#main-card'), mainBody = $('#main-body');
@@ -76,6 +78,8 @@ async function init() {
   autoRun = !!data.autoRun;
   canRunSql = data.canRunSql !== false && data.sqlEnabled !== false;
   agentLabel = data.backend === 'codex' ? 'Codex' : 'Claude';
+  isCodex = data.backend === 'codex';
+  $('#btn-sel-return').hidden = !isCodex; // そのまま返す口は Codex だけ
   mainCard.querySelector('.eyebrow').textContent = `本筋（${agentLabel}の出力）`;
   $('#pending').textContent = `${agentLabel}が考えています…`;
   $('#done p').textContent = `${agentLabel} に戻って「終わった」と伝えてください。このタブは閉じて大丈夫です。`;
@@ -194,8 +198,10 @@ document.addEventListener('mouseup', (e) => {
   if (e.target.closest('#sel-menu')) return;
   setTimeout(() => {
     const sel = window.getSelection();
-    const text = sel ? sel.toString().trim() : '';
-    if (!text || !sel.rangeCount) return hideMenu();
+    const raw = sel ? sel.toString() : '';
+    const text = raw.trim();
+    // 空白だけの選択でも Codex なら「そのまま返す」に使えるのでメニューは出す
+    if (!sel || !sel.rangeCount || (!text && !(isCodex && raw))) return hideMenu();
     const range = sel.getRangeAt(0);
     const node = range.commonAncestorContainer;
     const host = (node.nodeType === 1 ? node : node.parentElement).closest('.selectable');
@@ -206,7 +212,8 @@ document.addEventListener('mouseup', (e) => {
     const rect = range.getBoundingClientRect();
     const srcRect = srcEl.getBoundingClientRect();
     const inCode = !!(node.nodeType === 1 ? node : node.parentElement).closest('pre') || !!(range.startContainer.parentElement && range.startContainer.parentElement.closest('pre'));
-    selCtx = { text: text.slice(0, inCode ? 3000 : 600), source, anchorY: (rect.top + rect.height / 2 - srcRect.top) / S.zoom, code: inCode, lines: inCode ? lineRangeOf(range) : '' };
+    selCtx = { text: text.slice(0, inCode ? 3000 : 600), source, anchorY: (rect.top + rect.height / 2 - srcRect.top) / S.zoom, code: inCode, lines: inCode ? lineRangeOf(range) : '', raw: isCodex ? raw : null };
+    $('#sel-menu').classList.toggle('blank-selection', !text); // 中身が無い選択は付箋系の動作を隠す
     showMenu(rect);
   }, 0);
 });
@@ -230,6 +237,13 @@ $('#sel-menu').addEventListener('click', (e) => {
   if (!b || !selCtx) return;
   hideMenu();
   window.getSelection().removeAllRanges();
+  if (b.dataset.action === 'return') {
+    selectedForReturn = selCtx.raw; // 送るのは選択時に取ったそのままの文字列
+    openSelectionReturn();
+    selCtx = null;
+    return;
+  }
+  selectedForReturn = null;
   createSticky(b.dataset.action, selCtx);
   selCtx = null;
 });
@@ -892,6 +906,26 @@ $('#btn-finish').onclick = () => {
 };
 $('#btn-ret-back').onclick = () => { $('#return-modal').hidden = true; };
 
+// 選んだ文をそのまま返す（Codex のときだけ見える口）。
+// 選択時に取ったそのままの文字列を、確認用に読み取り専用で見せる。
+// 送るのは「取ったときの文字列」であって、プレビューの textarea の値ではない
+// （textarea は CRLF を LF に揃えてしまうことがあるので）。
+// 送信に失敗しても消さない：戻るを押すか、成功するまで覚えておく。
+function openSelectionReturn() {
+  $('#selection-preview').value = selectedForReturn == null ? '' : selectedForReturn;
+  $('#selection-return-modal').hidden = false;
+}
+$('#btn-selection-back').onclick = () => {
+  selectedForReturn = null;
+  $('#selection-return-modal').hidden = true;
+};
+$('#btn-selection-send').onclick = async () => {
+  if (selectedForReturn == null) return;
+  const btn = $('#btn-selection-send');
+  btn.disabled = true;
+  try { await finishWith(selectedForReturn); } finally { btn.disabled = false; }
+};
+
 $('#btn-draft').onclick = async () => {
   const ids = [...document.querySelectorAll('#ret-list input:checked')].map((c) => c.dataset.id);
   if (!ids.length) { alert('付箋を1枚以上選んでください。'); return; }
@@ -915,7 +949,9 @@ async function finishWith(text) {
   const r = await post('/api/return', { text });
   if (!r.ok) { alert(r.error || '送れませんでした'); return; }
   try { sessionStorage.removeItem(STORE_KEY); } catch (_) {}
+  selectedForReturn = null;
   $('#return-modal').hidden = true;
+  $('#selection-return-modal').hidden = true;
   $('#done').hidden = false;
 }
 $('#btn-ret-send').onclick = () => {
