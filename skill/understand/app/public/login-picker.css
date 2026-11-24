@@ -1,0 +1,8 @@
+.login-picker {
+  margin: 6px 14px 0;
+  color: var(--ink-soft);
+  font: 12px/1.5 var(--font);
+}
+.login-picker summary { cursor: pointer; }
+.login-picker select { width: 100%; margin: 4px 0; font: inherit; }
+.login-picker-note { margin-top: 4px; }

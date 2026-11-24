@@ -22,6 +22,19 @@ case "$#:${1-}" in
   *) printf 'Usage: bash install.sh [--codex]\n' >&2; exit 2;;
 esac
 
+install_yomiyasu() {
+  local dest="${DEST%/*}/yomiyasu"
+  local reference="${DEST}/app/public/vendor/yomiyasu"
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    echo "既存のパスを変更せず、yomiyasu の導入を省きます：$dest"
+    return 0
+  fi
+  mkdir "$dest"
+  cp -R "$reference"/{SKILL.md,LICENSE,UNICODE-LICENSE.txt,references} \
+    "$HERE/install-data/yomiyasu"/{assets,scripts} "$dest/"
+  echo "標準の校正スキルをインストールしました：$dest"
+}
+
 if [ "${1:-}" = "--codex" ]; then
   # Codex 版：共有のアプリと pr-guide に、Codex 用の SKILL.md と agents 設定を重ねる。
   # すでに何かある場所には上書きしない（リンクも含む）。消したいときは自分で消してからやり直す。
@@ -37,6 +50,7 @@ if [ "${1:-}" = "--codex" ]; then
   cp "${HERE}/skill/understand/pr-guide.md" "${DEST}/pr-guide.md"
   cp "${HERE}/skill/codex/understand/SKILL.md" "${DEST}/SKILL.md"
   cp -R "${HERE}/skill/codex/understand/agents" "${DEST}/agents"
+  install_yomiyasu
 
   echo "インストールしました：${DEST}"
   echo "Codex で \$understand と打つと使えます（暗黙には起動しません）。"
@@ -44,9 +58,14 @@ if [ "${1:-}" = "--codex" ]; then
 fi
 
 DEST="${HOME}/.claude/skills/understand"
+if [ -e "${DEST}" ] || [ -L "${DEST}" ]; then
+  echo "${DEST} はすでにあります。上書きはしません。入れ直すなら、まず自分で取り除いてください。" >&2
+  exit 1
+fi
 mkdir -p "${HOME}/.claude/skills"
-rm -rf "${DEST}"
-cp -R "${HERE}/skill/understand" "${DEST}"
+mkdir "${DEST}"
+cp -R "${HERE}/skill/understand/." "${DEST}/"
+install_yomiyasu
 
 echo "インストールしました：${DEST}"
 echo "Claude Code を開き直すと /understand が使えます。"

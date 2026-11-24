@@ -3,9 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="img-src 'self' blob: data:; connect-src 'self' blob:">
 <title>understand-mode</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="figures.css">
+<link rel="stylesheet" href="login-picker.css">
 <script src="vendor/marked.min.js"></script>
 <script src="vendor/purify.min.js"></script>
 <script src="vendor/mermaid.min.js"></script>
@@ -100,6 +104,7 @@
         <button id="tz-tab-write" class="tz-tab on" role="tab" aria-selected="true">書く</button>
         <button id="tz-tab-read" class="tz-tab" role="tab" aria-selected="false">読む</button>
         <button id="tz-tab-words" class="tz-tab" role="tab" aria-selected="false">語の候補</button>
+        <button id="tz-tab-history" class="tz-tab" role="tab" aria-selected="false">履歴</button>
       </div>
       <button id="btn-tz-export" class="btn-outline" type="button">Markdownを書き出す</button>
       <button id="btn-tz-close" class="btn-outline" type="button">閉じる</button>
@@ -108,8 +113,28 @@
       <textarea id="tz-edit" class="tz-edit" spellcheck="false" aria-label="推敲する原稿"></textarea>
       <div id="tz-read" class="tz-read md" hidden></div>
       <div id="tz-words" class="tz-words" hidden></div>
+      <section id="tz-history" class="tz-history" hidden>
+        <h3>手直しを記録する</h3>
+        <p class="muted small">下書きで直接直した範囲です。何か所か直した場合は、間の文も含みます。</p>
+        <div id="tz-manual-preview"></div>
+        <div class="row">
+          <label for="tz-reason">理由（任意）</label>
+          <input id="tz-reason" type="text" maxlength="1000">
+          <button id="btn-tz-record" class="btn-outline" type="button">手直しを記録</button>
+        </div>
+        <h3>記録した修正</h3>
+        <button id="btn-tz-history-export" class="btn-outline" type="button">履歴をJSONで書き出す</button>
+        <ol id="tz-records"></ol>
+      </section>
     </div>
-    <footer class="tz-foot">
+    <details id="figure-gallery">
+      <summary>ローカルの図</summary>
+      <label>図を追加 <input type="file" accept="image/png,image/jpeg,image/webp"></label>
+      <button type="button" class="btn-outline">一覧を更新</button>
+      <span role="status"></span>
+      <div class="figure-list"></div>
+    </details>
+    <footer class="tz-foot" id="tz-tools">
       <p class="muted small" id="tz-sel-info">文を選ぶと、その部分だけをAIに推敲してもらえます。</p>
       <div class="row">
         <label for="tz-comment" class="label">読み手への希望</label>
@@ -124,8 +149,9 @@
           <button id="btn-tz-adopt" class="btn-primary" type="button">この提案に替える</button>
         </div>
       </div>
-      <p id="tz-error" class="tz-error" hidden></p>
     </footer>
+    <p id="tz-error" class="tz-error" role="status" hidden></p>
+    <p id="tz-storage-warning" class="tz-error" role="status" hidden></p>
   </div>
 </dialog>
 
@@ -136,6 +162,8 @@
   </div>
 </div>
 
+<script src="login-picker.js"></script>
+<script src="figures.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

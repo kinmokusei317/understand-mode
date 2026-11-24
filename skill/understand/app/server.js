@@ -103,6 +103,24 @@ function codex() {
   return codexBoard;
 }
 
+const { create: createLoginCli, LOGIN_MODELS } = require('./login-cli');
+let loginCliBoard = null;
+let loginCliClosing = false;
+function loginCli() {
+  if (loginCliClosing) throw new Error('このボードはすでに閉じています');
+  if (!loginCliBoard) {
+    loginCliBoard = createLoginCli({ workDir: WORK_DIR, timeoutMs: TIMEOUT_SEC * 1000 });
+  }
+  return loginCliBoard;
+}
+async function closeLoginCli() {
+  loginCliClosing = true;
+  if (!loginCliBoard) return { ok: true };
+  try { return await loginCliBoard.close(); }
+  catch (e) { return { ok: false, error: e.message }; }
+  finally { loginCliBoard = null; }
+}
+
 function parseArgs(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i++) {
@@ -267,7 +285,43 @@ function checkSql(raw) {
   return { sql };
 }
 
-function runClaude({ prompt, resume, fork, allowedTools, disallowedTools, appendSystem, matchMainMode, noTools }) {
+const CLAUDE_ENV_DROP = [
+  'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_CUSTOM_HEADERS',
+  'CLAUDE_CODE_API_KEY', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY',
+  'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL',
+  'ANTHROPIC_DEFAULT_OPUS_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL',
+];
+
+function claudeChildEnv() {
+  const env = { ...process.env };
+  for (const k of CLAUDE_ENV_DROP) delete env[k];
+  return env;
+}
+
+function claudeLoggedIn(env) {
+  return new Promise((resolve) => {
+    const child = spawn(CLAUDE_BIN, ['--safe-mode', '--setting-sources', '', 'auth', 'status', '--json'],
+      { cwd: SPAWN_CWD, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    const timer = setTimeout(() => child.kill('SIGTERM'), 10 * 1000);
+    child.stdout.on('data', (d) => { out += d; });
+    child.on('error', () => { clearTimeout(timer); resolve(false); });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return resolve(false);
+      try {
+        const j = JSON.parse(out);
+        resolve(j.loggedIn === true && j.authMethod === 'claude.ai' && j.apiProvider === 'firstParty');
+      } catch (_) { resolve(false); }
+    });
+  });
+}
+
+async function runClaude({ prompt, resume, fork, allowedTools, disallowedTools, appendSystem, matchMainMode, noTools }) {
+  const env = claudeChildEnv();
+  if (!(await claudeLoggedIn(env))) {
+    return { ok: false, error: 'Claudeに claude.ai でログインしていません（claude auth login を実行してください）' };
+  }
   return new Promise((resolve) => {
     const cmd = ['-p', prompt, '--output-format', 'json'];
     if (resume) { cmd.push('--resume', resume); if (fork) cmd.push('--fork-session'); }
@@ -283,7 +337,7 @@ function runClaude({ prompt, resume, fork, allowedTools, disallowedTools, append
     if (matchMainMode && AUTO_RUN) cmd.push('--permission-mode', 'bypassPermissions');
 
     // stdin を開けたままにすると claude が入力を3秒待つので、最初から閉じておく
-    const child = spawn(CLAUDE_BIN, cmd, { cwd: SPAWN_CWD, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(CLAUDE_BIN, cmd, { cwd: SPAWN_CWD, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '', stderr = '';
     const timer = setTimeout(() => child.kill('SIGTERM'), TIMEOUT_SEC * 1000);
     child.stdout.on('data', d => { stdout += d; });
@@ -344,12 +398,15 @@ const server = http.createServer(async (req, res) => {
       const deny = denyReason(req, url);
       if (deny) return send(res, 403, { ok: false, error: `${deny}。understand-modeのURLから開き直してください。` });
     }
+    if (url.pathname === '/api/figures' || url.pathname.startsWith('/api/figures/')) {
+      return require('./figures')(req, res, url, WORK_DIR, send);
+    }
     if (req.method === 'GET' && url.pathname === '/api/init') {
       const mdPath = path.join(WORK_DIR, 'main.md');
       const markdown = fs.existsSync(mdPath) ? fs.readFileSync(mdPath, 'utf8') : '# 本筋がありません\n\nmain.md が見つかりませんでした。';
       let title = '';
       try { title = fs.readFileSync(path.join(WORK_DIR, 'title.txt'), 'utf8').trim(); } catch (_) {}
-      return send(res, 200, { markdown, title, hasSession: !!mainSessionId, project: path.basename(PROJECT_CWD), autoRun: AUTO_RUN, backend: AGENT, canRunSql: !IS_CODEX, sqlEnabled: !IS_CODEX, tsuzuri: true });
+      return send(res, 200, { markdown, title, hasSession: !!mainSessionId, project: path.basename(PROJECT_CWD), autoRun: AUTO_RUN, backend: AGENT, canRunSql: !IS_CODEX, sqlEnabled: !IS_CODEX, tsuzuri: true, loginPicker: true });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/ask') {
@@ -441,8 +498,12 @@ const server = http.createServer(async (req, res) => {
       if (comment.length > 1000) return send(res, 200, { ok: false, error: '読み手への希望が長すぎます（1000字まで）。' });
       // 推敲の考え方は upstream の資料をそのまま渡す（要約や言い換えはしない）
       let reference;
+      let preservation;
       try {
         reference = fs.readFileSync(path.join(PUBLIC_DIR, 'vendor', 'tsuzuri', 'intent-quality.md'), 'utf8');
+        const skill = fs.readFileSync(path.join(PUBLIC_DIR, 'vendor', 'yomiyasu', 'SKILL.md'), 'utf8');
+        preservation = skill.match(/^### 最優先ルール: 意味の保持\n[\s\S]+?(?=\n\n### )/m)?.[0];
+        if (!preservation) throw new Error('yomiyasu の意味保持の節が見つかりません');
       } catch (e) {
         return send(res, 200, { ok: false, error: `推敲の参考資料を読めませんでした: ${e.message}` });
       }
@@ -451,6 +512,8 @@ const server = http.createServer(async (req, res) => {
         'この文で読み手が何を得るかを考え、主語と指示対象を明確にし、重複を省いて自然な日本語にしてください。事実・数値・確かさ・引用・コード・Markdown構造を保ち、根拠を足さないでください。',
         '修正した抜粋だけを返してください。説明や前置きは不要です。',
         '推敲の参考（Tsuzuri「執筆意図の質の確認」）:\n' + reference,
+        '校正には同梱の yomiyasu の基本原則を使い、提案文だけを返してください。',
+        preservation,
         JSON.stringify({ text, comment }),
       ].join('\n');
       if (IS_CODEX) {
@@ -458,6 +521,33 @@ const server = http.createServer(async (req, res) => {
         return send(res, 200, await codex().draft(prompt));
       }
       return send(res, 200, await runClaude({ prompt, noTools: true }));
+    }
+
+    if (req.method === 'GET' && url.pathname === '/api/providers') {
+      try {
+        return send(res, 200, { ok: true, providers: await loginCli().providers() });
+      } catch (e) {
+        return send(res, 200, { ok: false, error: 'ログイン中のCLIを確認できませんでした' });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/cli-question') {
+      const b = await readBody(req);
+      const models = LOGIN_MODELS.get(b.provider);
+      if (!models || !models.includes(b.model)) {
+        return send(res, 200, { ok: false, error: '送信先かモデルが対応していません' });
+      }
+      const question = typeof b.question === 'string' ? b.question : '';
+      const anchor = typeof b.anchor === 'string' ? b.anchor : '';
+      if (!question.trim()) return send(res, 200, { ok: false, error: '質問が空です' });
+      if (question.length > 12000) return send(res, 200, { ok: false, error: '質問が長すぎます（12000字まで）。' });
+      if (anchor.length > 12000) return send(res, 200, { ok: false, error: '引用が長すぎます（12000字まで）。' });
+      const prompt = anchor.trim() ? `引用:\n${anchor}\n\n質問:\n${question}` : question;
+      try {
+        return send(res, 200, await loginCli().ask({ provider: b.provider, model: b.model, prompt }));
+      } catch (e) {
+        return send(res, 200, { ok: false, error: e.message });
+      }
     }
 
     if (req.method === 'POST' && url.pathname === '/api/return') {
@@ -478,15 +568,18 @@ const server = http.createServer(async (req, res) => {
         if (codexBoard) {
           try { cleanup = await codexBoard.close(); } catch (e) { cleanup = { ok: false, error: e.message }; }
         }
-        send(res, 200, cleanup.ok ? { ok: true } : { ok: false, error: cleanup.error });
-        setTimeout(() => { server.close(); process.exit(cleanup.ok ? 0 : 1); }, 500);
+        const loginCleanup = await closeLoginCli();
+        const errors = [...new Set([cleanup.error, loginCleanup.error].filter(Boolean))];
+        send(res, 200, errors.length ? { ok: false, error: errors.join(' / ') } : { ok: true });
+        setTimeout(() => { server.close(); process.exit(errors.length ? 1 : 0); }, 500);
         return;
       }
       const text = (b.text || '').trim();
       fs.writeFileSync(path.join(WORK_DIR, 'return.md'), text ? text + '\n' : '(本筋に返すことはありません)\n');
       cleanupForkedSessions();
-      send(res, 200, { ok: true });
-      setTimeout(() => { server.close(); process.exit(0); }, 500);
+      const loginCleanup = await closeLoginCli();
+      send(res, 200, loginCleanup.ok ? { ok: true } : { ok: false, error: loginCleanup.error });
+      setTimeout(() => { server.close(); process.exit(loginCleanup.ok ? 0 : 1); }, 500);
       return;
     }
 
@@ -520,21 +613,23 @@ server.listen(Number(args.port || 0), '127.0.0.1', () => {
   if (!args['no-open']) openBrowser(url);
 });
 
-// Codex の寄り道だけは、終わるときに専用の保管庫を消す手順を必ず通す。
-// Claude 側はこれまでどおり（終了時の片付けは /api/return で済んでいる）。
-if (IS_CODEX) {
+{
   let shuttingDown = false;
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
     codexClosed = true;
+    loginCliClosing = true;
     (async () => {
       let ok = true;
       if (codexBoard) {
         try { ok = (await codexBoard.close()).ok !== false; }
         catch (_) { ok = false; }
       }
-      // 片付けに失敗したのに正常終了とは言わない
+      if (loginCliBoard) {
+        try { if ((await loginCliBoard.close()).ok === false) ok = false; }
+        catch (_) { ok = false; }
+      }
       process.exit(ok ? 0 : 1);
     })();
   };

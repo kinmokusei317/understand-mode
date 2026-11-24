@@ -1,0 +1,9 @@
+board-figure img { display: inline-block; max-width: 100%; height: auto; vertical-align: middle; }
+#figure-gallery { padding: .35rem 1rem; border-top: 1px solid var(--edge); min-height: 0; flex: 0 1 auto; overflow: auto; max-height: 30vh; }
+#figure-gallery summary { cursor: pointer; font-weight: 600; }
+#figure-gallery label, #figure-gallery button, #figure-gallery [role=status] { font-size: .84rem; margin: .3rem .4rem .3rem 0; }
+#figure-gallery input { max-width: 100%; }
+.figure-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(10rem, 100%), 1fr)); gap: .6rem; }
+.figure-list figure { margin: 0; min-width: 0; }
+.figure-list img { max-height: 8rem; object-fit: contain; }
+.figure-list figcaption { font-size: .78rem; overflow-wrap: anywhere; user-select: all; }

@@ -16,6 +16,7 @@ const sessions = path.join(codexHome, 'sessions', '2026', '01', '01');
 fs.mkdirSync(sessions, { recursive: true });
 fs.writeFileSync(path.join(sessions, `rollout-2026-01-01T00-00-00-${main}.jsonl`),
   JSON.stringify({ type: 'session_meta', payload: { id: main, model_provider: 'openai' } }) + '\n');
+fs.writeFileSync(path.join(codexHome, 'auth.json'), '{}', { mode: 0o600 });
 const env = { ...process.env, HOME: dir, CODEX_HOME: codexHome, UNDERSTAND_CODEX_BIN: mock,
   MOCK_CODEX_LOG: log, MOCK_CODEX_STORE: path.join(dir, 'memory.json') };
 const base = ['--backend', 'codex', '--dir', dir, '--cwd', root, '--no-open'];
@@ -62,6 +63,7 @@ const delay = ms => new Promise(r => setTimeout(r, ms));
     r = await api('ask', { sessionId: main, continueSession: true, followUp: 'unsafe after bad fork' });
     assert.strictEqual(r.ok, false);
     const calls = fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse)
+      .filter(({ argv: args }) => args[0] === 'exec')
       .map(({ argv: args, stdin: prompt }) => ({ args, prompt }));
     assert.strictEqual(calls.length, 7);
     assert.deepStrictEqual(calls.slice(0, 3).map(c => c.args.includes('fork') ? 'fork' : 'resume'), ['fork', 'resume', 'fork']);

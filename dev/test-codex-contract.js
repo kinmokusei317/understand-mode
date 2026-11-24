@@ -36,6 +36,8 @@ const FAKE_HOME = path.join(TMP, 'home');
 const STORE = path.join(TMP, 'store.json');
 const LOG = path.join(TMP, 'codex-log.jsonl');
 fs.mkdirSync(FAKE_HOME, { recursive: true });
+fs.mkdirSync(CODEX_HOME, { recursive: true });
+fs.writeFileSync(path.join(CODEX_HOME, 'auth.json'), '{}', { mode: 0o600 });
 
 function rolloutPath(id) {
   const dir = path.join(CODEX_HOME, 'sessions', '2026', '01', '01');
@@ -176,7 +178,7 @@ function mockDirect(argv2, input, home = CODEX_HOME) {
   const parentRollout = fs.readFileSync(rolloutPath(P), 'utf8');
   let C, D, E, recovery, boardHome;
   function checkCall(name, before, op, source, marker) {
-    const calls = readLog().slice(before);
+    const calls = readLog().slice(before).filter((c) => c.argv[0] === 'exec');
     const call = calls[0];
     ok(name, calls.length === 1 && call.argv[0] === 'exec' &&
       positional(call.argv).join(' ') === [op, source, '-'].join(' ') && call.stdin.includes(marker), JSON.stringify(calls));
@@ -273,7 +275,7 @@ function mockDirect(argv2, input, home = CODEX_HOME) {
 
   console.log('\n6. どの呼び出しも、権限を拡大せず「一番新しい会話」を推測しない');
   {
-    const entries = readLog();
+    const entries = readLog().filter((e) => e.argv[0] === 'exec');
     const bad = [];
     for (const e of entries) {
       const notes = permissionNotes(e.argv);
@@ -307,7 +309,8 @@ function mockDirect(argv2, input, home = CODEX_HOME) {
     fs.writeFileSync(STORE, JSON.stringify({ ...state, mcpWarning: true }));
     const checkpoint = readLog().length;
     const refused = await post(s, '/api/draft', { notes: 'MCP authentication failure' });
-    ok('MCP 確認が exit 0 でも認証エラーならモデルを呼ばない', refused.ok === false && readLog().length === checkpoint);
+    ok('MCP 確認が exit 0 でも認証エラーならモデルを呼ばない',
+      refused.ok === false && !readLog().slice(checkpoint).some((e) => e.argv[0] === 'exec'));
     fs.writeFileSync(STORE, JSON.stringify(state));
   }
 

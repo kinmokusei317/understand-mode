@@ -40,9 +40,12 @@ function startServer(extraArgs, extraEnv) {
   fs.writeFileSync(path.join(dir, 'title.txt'), 'テスト原稿\n');
   const srv = spawn(process.execPath, [
     path.join(ROOT, 'skill/understand/app/server.js'),
-    '--dir', dir, '--cwd', ROOT, '--port', '0', '--no-open',
+    '--dir', dir, '--cwd', dir, '--port', '0', '--no-open',
   ].concat(extraArgs), {
-    env: { ...process.env, UNDERSTAND_MOCK_DELAY: '500', ...extraEnv },
+    cwd: dir,
+    env: { HOME: dir, PATH: process.env.PATH, TMPDIR: os.tmpdir(), UNDERSTAND_MOCK_DELAY: '500',
+      UNDERSTAND_CLAUDE_BIN: path.join(ROOT, 'dev/mock-claude.js'),
+      UNDERSTAND_CODEX_BIN: path.join(ROOT, 'dev/mock-codex.js'), ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   srv.log = '';
@@ -62,25 +65,21 @@ async function waitUrl(srv) {
 // 子プロセスは必ず畳む（テストが途中で失敗しても残さない）
 const procs = [];
 async function main() {
-  const srv = startServer(
-    ['--session', 'mock-main-session'],
-    { UNDERSTAND_CLAUDE_BIN: path.join(ROOT, 'dev/mock-claude.js') });
+  const srv = startServer(['--session', 'mock-main-session']);
   procs.push(srv);
   const URL = await waitUrl(srv);
 
   // Codex のボード（推敲が「記録に残さない下書き」で呼ばれることを確かめる）
   const CODEX_LOG = path.join(os.tmpdir(), 'tz-mock-codex-log.jsonl');
   const CODEX_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'tz-codex-home-'));
-  const FAKE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'tz-home-'));
+  fs.writeFileSync(path.join(CODEX_HOME, 'auth.json'), '{}', { mode: 0o600 });
   fs.rmSync(CODEX_LOG, { force: true });
   const PARENT_UUID = '12345678-1234-1234-1234-1234567890ab';
   const srvCodex = startServer(
     ['--agent', 'codex', '--session', PARENT_UUID],
     {
-      HOME: FAKE_HOME,
       CODEX_HOME,
       UNDERSTAND_AGENT: 'codex',
-      UNDERSTAND_CODEX_BIN: path.join(ROOT, 'dev/mock-codex.js'),
       MOCK_CODEX_LOG: CODEX_LOG,
       MOCK_CODEX_STORE: path.join(os.tmpdir(), 'tz-mock-codex-store.json'),
     });
@@ -377,7 +376,7 @@ async function main() {
   }
 }
 
-main().then((code) => {
-  process.exit(errors.length ? 1 : 0);
-}).catch((e) => { console.error('FAIL', e); process.exit(1); })
+main().then(() => {
+  process.exitCode = errors.length ? 1 : 0;
+}).catch((e) => { console.error('FAIL', e); process.exitCode = 1; })
   .finally(() => { procs.forEach((p) => { try { p.kill(); } catch (_) {} }); });

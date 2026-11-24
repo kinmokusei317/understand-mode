@@ -135,11 +135,26 @@ function die(msg, code) {
     console.log('[]');
     return;
   }
+  if (argv[0] === 'login' && argv[1] === 'status') {
+    const authFile = path.join(CODEX_HOME, 'auth.json');
+    const hasAuth = fs.existsSync(authFile);
+    if (LOG) {
+      try { fs.appendFileSync(LOG, JSON.stringify({ argv, stdin: '', cwd: process.cwd(), home: CODEX_HOME, hasAuth, sensitive: [] }) + '\n'); } catch (_) {}
+    }
+    if (!hasAuth && process.env.MOCK_CODEX_KEYRING !== '1') die('Not logged in', 1);
+    console.log('Logged in using ChatGPT');
+    return;
+  }
   const { sub, session, prompt } = parse();
   const input = prompt === '-' ? await readStdin() : (prompt || '');
 
   if (LOG) {
-    try { fs.appendFileSync(LOG, JSON.stringify({ argv, stdin: input, cwd: process.cwd(), home: CODEX_HOME }) + '\n'); } catch (_) {}
+    try {
+      const sensitive = Object.keys(process.env).filter((k) => /API_KEY|TOKEN|SECRET|BASE_URL/i.test(k));
+      const entry = { argv, stdin: input, cwd: process.cwd(), home: CODEX_HOME,
+        hasAuth: fs.existsSync(path.join(CODEX_HOME, 'auth.json')), sensitive };
+      fs.appendFileSync(LOG, JSON.stringify(entry) + '\n');
+    } catch (_) {}
   }
 
   const behave = (input.match(/behave:(\w+)/) || [])[1] || process.env.MOCK_CODEX_BEHAVE || '';

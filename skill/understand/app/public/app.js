@@ -17,6 +17,7 @@ let selectedForReturn = null; // Codexの「選んだ文を返す」用。空白
 let mmSeq = 0;
 // メインが確認なしで動いているか。/api/init で届く
 let autoRun = false;
+let hasLoginPicker = false;
 // SQLを実行できるか（Codex では提案まで）。/api/init で届く
 let canRunSql = true;
 // 応答してくれる側の呼び名（Claude / Codex）。表示だけに使う
@@ -48,7 +49,7 @@ marked.use({
 });
 mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral' });
 
-const md = (text) => DOMPurify.sanitize(marked.parse(text || ''));
+const md = localFigures.markdown;
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const short = (t, n = 28) => { const s = (t || '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n) + '…' : s; };
 const now = () => new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' });
@@ -64,6 +65,7 @@ async function post(url, body) {
 
 // ---------------- 初期化 ----------------
 async function init() {
+  localFigures.init(TOKEN);
   let data;
   let initOk = false;
   try { data = await fetch('/api/init', { headers: apiHeaders }).then((r) => r.json()); initOk = true; }
@@ -85,6 +87,7 @@ async function init() {
     }
   });
   autoRun = !!data.autoRun;
+  hasLoginPicker = data.loginPicker === true;
   canRunSql = data.canRunSql !== false && data.sqlEnabled !== false;
   agentLabel = data.backend === 'codex' ? 'Codex' : 'Claude';
   isCodex = data.backend === 'codex';
@@ -344,7 +347,7 @@ function setPending(d) {
   pendingCount += d;
   const p = $('#pending');
   p.hidden = pendingCount <= 0;
-  p.textContent = pendingCount > 1 ? `${agentLabel}が考えています…（${pendingCount}）` : `${agentLabel}が考えています…`;
+  p.textContent = `考えています…${pendingCount > 1 ? `（${pendingCount}）` : ''}`;
 }
 
 function anchorFor(st) {
@@ -352,24 +355,27 @@ function anchorFor(st) {
   return `${st.lines ? st.lines + '\n' : ''}~~~~\n${st.anchorText}\n~~~~`;
 }
 
-async function ask(st, { action, question, followUp }) {
+async function ask(st, { action, question, followUp, isolated }) {
   if (st.busy) return;
   const parentSession = st.parent && st.parent !== 'main' && S.stickies[st.parent] ? S.stickies[st.parent].sessionId : null;
   const first = !st.sessionId;
-  const body = first
+  const body = isolated
+    ? { provider: isolated.provider, model: isolated.model, question, anchor: st.anchorText }
+    : first
     ? { action, anchor: anchorFor(st), question, sessionId: parentSession, continueSession: false }
     : { followUp, sessionId: st.sessionId, continueSession: true };
   st.messages.push({ role: 'user', text: question || followUp || ACTION_LABEL[action] || '質問' });
-  if (first && action === 'question' && question) st.title = short(question, 40);
+  if (first && action === 'question' && question && st.messages.length === 1) st.title = short(question, 40);
   st.busy = true; setPending(1); renderSticky(st);
-  const r = await post('/api/ask', body);
+  const r = await post(isolated ? '/api/cli-question' : '/api/ask', body);
   st.busy = false; setPending(-1);
-  if (r.ok) { st.sessionId = r.sessionId || st.sessionId; st.messages.push({ role: 'assistant', text: r.text }); }
+  if (r.ok && isolated) st.messages.push({ role: 'assistant', isolated, text: r.text });
+  else if (r.ok) { st.sessionId = r.sessionId || st.sessionId; st.messages.push({ role: 'assistant', text: r.text }); }
   else st.messages.push({ role: 'error', text: r.error || '失敗しました' });
   save(); renderSticky(st); refreshStatus(); drawWires();
 
   // メインが確認なしで動いているなら、提案されたSQLはそのまま実行する
-  if (r.ok && autoRun && canRunSql) {
+  if (!isolated && r.ok && autoRun && canRunSql) {
     const msg = st.messages[st.messages.length - 1];
     const sql = firstSql(msg.text);
     if (sql) await runSql(st, msg, sql);
@@ -383,7 +389,7 @@ function firstSql(text) {
 }
 
 async function runSql(st, msg, sql) {
-  if (st.busy || !canRunSql) return;
+  if (st.busy || !canRunSql || msg.isolated) return;
   if (!st.sessionId) { st.messages.push({ role: 'error', text: 'この付箋にはまだセッションがありません。' }); return renderSticky(st); }
   msg.ranSql = (msg.ranSql || []).concat([sql.trim()]);
   st.messages.push({ role: 'user', text: autoRun ? 'このSQLを実行（メインと同じく確認なし）' : 'このSQLを承認して実行' });
@@ -471,7 +477,7 @@ function renderSticky(st, skipWires) {
     return finish();
   }
   st.messages.forEach((m) => body.append(renderMessage(st, m)));
-  if (st.busy) body.append(el('div', 'msg thinking', `${agentLabel}が考えています…`));
+  if (st.busy) body.append(el('div', 'msg thinking', '考えています…'));
   box.append(body);
 
   // 入力欄
@@ -479,19 +485,21 @@ function renderSticky(st, skipWires) {
   const ta = el('textarea');
   ta.rows = 2;
   const firstQuestion = st.type === 'question' && !st.sessionId && !st.messages.some((m) => m.role === 'user');
-  ta.placeholder = firstQuestion ? '何がわからない？（⌘/Ctrl+Enterで送信）' : '続けて聞く（⌘/Ctrl+Enterで送信）';
+  ta.placeholder = firstQuestion || hasLoginPicker ? '何がわからない？（⌘/Ctrl+Enterで送信）' : '続けて聞く（⌘/Ctrl+Enterで送信）';
   ta.setAttribute('aria-label', '質問を入力');
   const send = el('button', null, '送信');
   send.disabled = !!st.busy;
   const go = () => {
     const q = ta.value.trim();
     if (!q || st.busy) return;
-    if (!st.sessionId) ask(st, { action: 'question', question: q });
+    if (hasLoginPicker && st.loginChoice) ask(st, { action: 'question', question: q, isolated: st.loginChoice });
+    else if (!st.sessionId) ask(st, { action: 'question', question: q });
     else ask(st, { followUp: q });
   };
   send.onclick = go;
   ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); go(); } });
   row.append(ta, send);
+  if (hasLoginPicker) box.append(loginPicker.render(st));
   box.append(row);
   requestAnimationFrame(() => { body.scrollTop = body.scrollHeight; });
   return finish();
@@ -507,6 +515,7 @@ function renderMessage(st, m) {
   if (m.role === 'error') return el('div', 'msg error', m.text);
 
   const wrap = el('div', 'msg assistant');
+  if (m.isolated) wrap.append(el('div', 'source-line', `${loginPicker.label(m.isolated)} の回答（履歴なし）`));
   const div = el('div', 'md selectable');
   div.dataset.source = st.id;
   div.innerHTML = md(m.text);
@@ -566,6 +575,7 @@ function renderMessage(st, m) {
 }
 
 function sqlBox(st, m, sql, pre) {
+  if (m.isolated) return pre;
   const ran = (m.ranSql || []).includes(sql.trim()) || m.kind === 'result';
   const box = el('div', 'sql-box' + (ran ? ' ran' : ''));
   const head = el('div', 'sql-head');
@@ -958,7 +968,7 @@ async function finishWith(text) {
   const r = await post('/api/return', { text });
   if (!r.ok) { alert(r.error || '送れませんでした'); return; }
   try { sessionStorage.removeItem(STORE_KEY); } catch (_) {}
-  try { sessionStorage.removeItem(TZ_STORE); } catch (_) {}
+  forgetTzNote();
   selectedForReturn = null;
   $('#return-modal').hidden = true;
   $('#selection-return-modal').hidden = true;
@@ -977,9 +987,10 @@ $('#btn-ret-none').onclick = () => { if (confirm('何も返さずに閉じます
 // 下書きはこのボード（この合言葉）のこのタブだけの sessionStorage に置き、
 // メインに返して閉じるときにいっしょに捨てる。開くだけ・打つだけではAIもサーバーも呼ばない。
 const TZ_STORE = 'understand-tsuzuri-' + TOKEN;
+const TZ_LEDGER = 'understand-tsuzuri-v1:' + TOKEN;
 // gen は依頼の世代。閉じる・新しい依頼で古い結果を捨てる
 // draft は sessionStorage に書けないときの頼み（同じページ内でだけ残る）
-const tz = { tab: 'write', words: null, pending: null, busy: false, gen: 0, draft: null, draftWarned: false };
+const tz = { tab: 'write', words: null, pending: null, busy: false, gen: 0, note: null, preview: null };
 
 function tzError(msg) {
   const e = $('#tz-error');
@@ -989,13 +1000,16 @@ function tzError(msg) {
 
 function tzTab(name) {
   tz.tab = name;
-  ['write', 'read', 'words'].forEach((t) => {
+  ['write', 'read', 'words', 'history'].forEach((t) => {
     $('#tz-tab-' + t).classList.toggle('on', t === name);
     $('#tz-tab-' + t).setAttribute('aria-selected', t === name ? 'true' : 'false');
   });
   $('#tz-edit').hidden = name !== 'write';
   $('#tz-read').hidden = name !== 'read';
   $('#tz-words').hidden = name !== 'words';
+  $('#tz-history').hidden = name !== 'history';
+  $('#tz-tools').hidden = name === 'history';
+  if (name === 'history') renderTzHistory();
   if (name === 'read') $('#tz-read').innerHTML = md($('#tz-edit').value);
   if (name === 'words') renderTzWords();
   updateTzSel();
@@ -1003,16 +1017,99 @@ function tzTab(name) {
 
 // 下書きはタブの sessionStorage が基本。書けなければこのページの記憶だけに置き、
 // 保存できなかったことを（編集は止めずに）知らせる
-function saveTzDraft() {
-  tz.draft = $('#tz-edit').value;
-  try {
-    sessionStorage.setItem(TZ_STORE, tz.draft);
-  } catch (_) {
-    if (!tz.draftWarned) {
-      tz.draftWarned = true;
-      tzError('このタブでは下書きを保存できませんでした。編集はこのページを開いているあいだ残ります。');
-    }
+function tzStorageWarning(message) {
+  const e = $('#tz-storage-warning');
+  e.textContent = message;
+  e.hidden = !message;
+}
+
+function validTzSpan(s) {
+  return s && typeof s.before === 'string' && typeof s.after === 'string' && s.before !== s.after;
+}
+
+function validTzNote(n) {
+  return n && typeof n.draft === 'string' && typeof n.base === 'string' &&
+    Array.isArray(n.queue) && n.queue.every(s => validTzSpan(s) && Object.keys(s).length === 2) && Array.isArray(n.records) &&
+    n.records.every(r => validTzSpan(r) && Object.keys(r).length === 5 && ['ai', 'manual'].includes(r.kind) &&
+      (r.kind !== 'ai' || (r.before.trim() && r.after.trim())) &&
+      typeof r.comment === 'string' && r.comment.length <= 1000 &&
+      typeof r.time === 'string' && Number.isFinite(Date.parse(r.time)) && new Date(r.time).toISOString() === r.time);
+}
+
+function forgetTzNote() {
+  for (const key of [TZ_STORE, TZ_LEDGER]) {
+    try { sessionStorage.removeItem(key); } catch (_) {}
   }
+  tz.gen++;
+  tz.note = tz.preview = tz.pending = null;
+  for (const id of ['tz-edit', 'tz-comment', 'tz-reason']) $('#' + id).value = '';
+  for (const id of ['tz-records', 'tz-manual-preview', 'tz-read', 'tz-words', 'tz-suggest-text']) $('#' + id).replaceChildren();
+}
+
+function loadTzNote() {
+  if (tz.note) return;
+  const base = mainMarkdown.replace(/\r\n?/g, '\n');
+  tz.note = { draft: base, base, records: [], queue: [] };
+  try {
+    const value = sessionStorage.getItem(TZ_LEDGER);
+    if (value === null) {
+      tz.note.draft = sessionStorage.getItem(TZ_STORE) ?? base;
+      return;
+    }
+    const note = JSON.parse(value);
+    if (!validTzNote(note)) throw new Error();
+    tz.note = note;
+  } catch (_) {
+    tzStorageWarning('このタブに保存した下書きと履歴を読み込めません。本筋の写しを表示します。');
+  }
+}
+
+function saveTzDraft() {
+  tz.note.draft = $('#tz-edit').value;
+  try {
+    sessionStorage.setItem(TZ_LEDGER, JSON.stringify(tz.note));
+    sessionStorage.removeItem(TZ_STORE);
+    tzStorageWarning('');
+  } catch (_) {
+    tzStorageWarning('下書きと履歴を保存できませんでした。このページを再読み込みする前に書き出してください。');
+  }
+}
+
+function tzManualSpan() {
+  const after = $('#tz-edit').value, before = tz.note.base;
+  if (before === after || !after.trim()) return null;
+  const a = Array.from(before), b = Array.from(after);
+  let start = 0, x = a.length, y = b.length;
+  while (start < x && start < y && a[start] === b[start]) start++;
+  while (x > start && y > start && a[x - 1] === b[y - 1]) { x--; y--; }
+  return { before: a.slice(start, x).join(''), after: b.slice(start, y).join('') };
+}
+
+function tzFields(span, comment) {
+  const dl = el('dl');
+  const fields = [['修正前', span.before || '（なし）'], ['修正後', span.after || '（なし）']];
+  if (comment !== undefined) fields.push(['理由・希望', comment || '（なし）']);
+  for (const [label, text] of fields) dl.append(el('dt', '', label), el('dd', '', text));
+  return dl;
+}
+
+function renderTzHistory() {
+  const { records, queue } = tz.note;
+  tz.preview = queue[0] || tzManualSpan();
+  $('#tz-manual-preview').replaceChildren(...(tz.preview
+    ? [el('p', 'muted small', queue.length ? 'AI提案を採用する前の手直し（古いものから順に記録）' : '前回の記録からの手直し'), tzFields(tz.preview)]
+    : [el('p', 'muted small', '記録できる手直しはありません。')]));
+  $('#btn-tz-record').disabled = !tz.preview;
+  $('#tz-reason').disabled = !tz.preview;
+  const list = $('#tz-records');
+  list.replaceChildren();
+  for (const r of records.slice().reverse()) {
+    const li = el('li', '', `${r.kind === 'ai' ? 'AI提案の採用' : '手直し'} · ${new Date(r.time).toLocaleString('ja-JP')}`);
+    li.append(tzFields(r, r.comment));
+    list.append(li);
+  }
+  if (!records.length) list.append(el('li', 'muted small', '記録はまだありません。'));
+  $('#btn-tz-history-export').disabled = !records.length;
 }
 
 function updateTzSel() {
@@ -1084,10 +1181,8 @@ async function renderTzWords() {
 
 $('#btn-tsuzuri').onclick = () => {
   const ta = $('#tz-edit');
-  // ページの記憶は打つたびに更新される最新。保存に失敗したタブでは sessionStorage より新しい
-  let draft = tz.draft;
-  try { if (draft == null) draft = sessionStorage.getItem(TZ_STORE); } catch (_) {}
-  ta.value = draft != null ? draft : mainMarkdown;
+  loadTzNote();
+  ta.value = tz.note.draft;
   $('#tz-suggest').hidden = true;
   tz.pending = null;
   tzError('');
@@ -1105,18 +1200,36 @@ $('#tz-dialog').addEventListener('close', () => {
 $('#tz-tab-write').onclick = () => tzTab('write');
 $('#tz-tab-read').onclick = () => tzTab('read');
 $('#tz-tab-words').onclick = () => tzTab('words');
+$('#tz-tab-history').onclick = () => tzTab('history');
+$('#btn-tz-record').onclick = () => {
+  const span = tz.note.queue[0] || tzManualSpan();
+  if (!span || span.before !== tz.preview?.before || span.after !== tz.preview?.after) {
+    tzError('手直しの範囲が変わりました。内容を確認してください。');
+    renderTzHistory();
+    return;
+  }
+  tz.note.records.push({ ...span, kind: 'manual', comment: $('#tz-reason').value, time: new Date().toISOString() });
+  if (tz.note.queue.length) tz.note.queue.shift();
+  else tz.note.base = $('#tz-edit').value;
+  $('#tz-reason').value = '';
+  tzError('');
+  saveTzDraft();
+  renderTzHistory();
+};
 $('#tz-edit').addEventListener('input', () => { saveTzDraft(); if (tz.tab === 'words') renderTzWords(); });
 ['select', 'keyup', 'click'].forEach((ev) => $('#tz-edit').addEventListener(ev, updateTzSel));
 $('#tz-comment').addEventListener('input', updateTzSel);
 
-$('#btn-tz-export').onclick = () => {
-  const blob = new Blob([$('#tz-edit').value], { type: 'text/markdown;charset=utf-8' });
+function tzDownload(text, type, suffix) {
+  const blob = new Blob([text], { type });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = `${(mainTitle || 'tsuzuri').replace(/[\\/:*?"<>|]/g, '_')}.md`;
+  a.download = (mainTitle || 'tsuzuri').replace(/[\\/:*?"<>|]/g, '_') + suffix;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-};
+}
+$('#btn-tz-export').onclick = () => tzDownload($('#tz-edit').value, 'text/markdown;charset=utf-8', '.md');
+$('#btn-tz-history-export').onclick = () => tzDownload(JSON.stringify(tz.note.records, null, 2), 'application/json', '-修正履歴.json');
 
 // 推敲の依頼は、選んだ範囲と読み手の希望だけを送る（本筋・付箋の文脈は送らない）。
 // 返ってきた提案はまず文字列として見せ、採用されたときだけ、取った時の範囲へ当てる。
@@ -1135,7 +1248,8 @@ $('#btn-tz-revise').onclick = async () => {
   btn.disabled = true;
   btn.textContent = '考えています…';
   tzError('');
-  const r = await post('/api/tsuzuri/revise', { text: sel, comment: $('#tz-comment').value });
+  const comment = $('#tz-comment').value;
+  const r = await post('/api/tsuzuri/revise', { text: sel, comment });
   tz.busy = false;
   btn.textContent = '選んだ部分を推敲してもらう';
   updateTzSel();
@@ -1143,9 +1257,10 @@ $('#btn-tz-revise').onclick = async () => {
   if (gen !== tz.gen) return;
   if (!r.ok) { tzError(r.error || '推敲できませんでした'); return; }
   // 返ってきた文はそのまま扱う。空かどうかだけは捨てずに確かめる
-  const text = typeof r.text === 'string' ? r.text : '';
+  const text = typeof r.text === 'string' ? r.text.replace(/\r\n?/g, '\n') : '';
   if (!text.trim()) { tzError('提案が空でした'); return; }
-  tz.pending = { start, end, sel, snapshot, text };
+  if (text === sel) { tzError('提案は元の文と同じです。'); return; }
+  tz.pending = { start, end, sel, snapshot, text, comment };
   $('#tz-suggest-text').textContent = text;
   $('#tz-suggest').hidden = false;
 };
@@ -1160,7 +1275,11 @@ $('#btn-tz-adopt').onclick = () => {
     tzError('待っているあいだに原稿が変わったので、提案を当てられませんでした。もう一度選んでください。');
     return;
   }
+  const manual = tzManualSpan();
+  if (manual) tz.note.queue.push(manual);
   ta.value = ta.value.slice(0, p.start) + p.text + ta.value.slice(p.end);
+  tz.note.records.push({ before: p.sel, after: p.text, comment: p.comment, kind: 'ai', time: new Date().toISOString() });
+  tz.note.base = ta.value;
   saveTzDraft();
   tz.pending = null;
   $('#tz-suggest').hidden = true;

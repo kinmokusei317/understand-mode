@@ -11,7 +11,12 @@
     "link": "bash dev/link-skill.sh",
     "pr-demo": "bash dev/make-pr-demo.sh",
     "test:figures": "node dev/test-figures.js",
-    "test:tsuzuri": "node dev/test-tsuzuri.js"
+    "test:tsuzuri": "node dev/test-tsuzuri.js",
+    "test:model-picker": "node dev/test-model-picker.js",
+    "test:login-cli": "node dev/test-login-cli.js",
+    "test:installed": "node dev/test-installed-login.js",
+    "test:revisions": "node dev/test-revisions.js",
+    "test:local-images": "node dev/test-local-images.js"
   },
   "devDependencies": {
     "playwright": "^1.48.0"

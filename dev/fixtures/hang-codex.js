@@ -26,6 +26,7 @@ if (argv[0] === '--descendant') {
 
 if (argv[0] === '--version') { console.log('codex-cli 0.171.0'); process.exit(0); }
 if (argv[0] === 'mcp') { console.log('[]'); process.exit(0); }
+if (argv[0] === 'login' && argv[1] === 'status') { console.log('Logged in using ChatGPT'); process.exit(0); }
 
 // マーカーは MOCK_CODEX_LOG と同じフォルダに置く（試験側の一時フォルダ内）
 const MARKER = path.join(path.dirname(process.env.MOCK_CODEX_LOG || 'log'), 'grandchild.pid');

@@ -62,15 +62,21 @@ def run(root, endpoint, model):
     for d in (home, source, cwd, board):
         d.mkdir()
     # The shim changes only inference transport. Credentials/config/history are disposable.
-    cli = shutil.which("codex")
+    installed = Path.home() / ".local/share/understand-mode/node_modules/.bin/codex"
+    cli = str(installed) if installed.exists() else shutil.which("codex")
     assert cli and subprocess.check_output([cli, "--version"], text=True).strip() == "codex-cli 0.171.0"
     wrapper = root / "codex-local"
     base = f"http://127.0.0.1:{endpoint.server_port}/v1"
-    wrapper.write_text("#!/bin/sh\nexec " + shlex.quote(cli) +
-                       " -c " + shlex.quote(f'openai_base_url="{base}"') + ' "$@"\n')
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "login" ] && [ "$2" = "status" ]; then echo "Logged in using ChatGPT"; exit 0; fi\n'
+        "exec env CODEX_API_KEY=local-fixture-not-a-key " + shlex.quote(cli) +
+        " -c " + shlex.quote(f'openai_base_url="{base}"') + ' "$@"\n')
     wrapper.chmod(0o700)
+    (source / "auth.json").write_text("{}")
+    (source / "auth.json").chmod(0o600)
     env = dict(PATH=os.environ["PATH"], HOME=str(home), CODEX_HOME=str(source),
-               UNDERSTAND_CODEX_BIN=str(wrapper), CODEX_API_KEY="local-fixture-not-a-key",
+               UNDERSTAND_CODEX_BIN=str(wrapper),
                UNDERSTAND_TIMEOUT_SEC="30")
 
     def cli_turn(prompt, *cmd, store=source):

@@ -39,10 +39,9 @@ function childEnv(home, codexHome) {
   const take = (k) => { if (typeof process.env[k] === 'string') env[k] = process.env[k]; };
   ['PATH', 'TMPDIR', 'TMP', 'TEMP', 'LANG', 'SHELL', 'USER', 'LOGNAME',
     'SYSTEMROOT', 'WINDIR', 'COMSPEC',
-    'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN',
-    // テストの偽 codex にだけ渡す差し替え口。本番の分岐・権限・後片付けはこれで変えない
-    'MOCK_CODEX_STORE', 'MOCK_CODEX_LOG',
   ].forEach(take);
+  // テストの偽 codex にだけ渡す差し替え口。本番の分岐・権限・後片付けはこれで変えない
+  if (process.env.UNDERSTAND_CODEX_BIN) ['MOCK_CODEX_STORE', 'MOCK_CODEX_LOG'].forEach(take);
   for (const k of Object.keys(process.env)) if (/^LC_/.test(k)) env[k] = process.env[k];
   env.HOME = home;
   env.CODEX_HOME = codexHome;
@@ -238,6 +237,21 @@ function checkRolloutText(text, parentId) {
   }
 }
 
+function secureOwnerFile(file) {
+  let st;
+  try { st = fs.lstatSync(file); } catch (_) { return false; }
+  if (!st.isFile() || (st.mode & 0o077) !== 0) return false;
+  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) return false;
+  return true;
+}
+
+function linkAuthJson(destDir, srcDir, name = 'auth.json') {
+  const src = path.join(srcDir, name);
+  if (!secureOwnerFile(src)) return false;
+  try { fs.symlinkSync(src, path.join(destDir, name)); } catch (_) { return false; }
+  return true;
+}
+
 function createCodex({ parentId, workDir, model, timeoutMs }) {
   // グループごとの停止が前提なので、POSIX 以外では何も作らず・何も産まずに断る
   if (process.platform === 'win32') {
@@ -248,7 +262,8 @@ function createCodex({ parentId, workDir, model, timeoutMs }) {
   if (model !== undefined && model !== null && typeof model !== 'string') {
     throw new Error('モデルの指定が不正です');
   }
-  const bin = process.env.UNDERSTAND_CODEX_BIN || 'codex';
+  const installedBin = path.join(os.homedir(), '.local', 'share', 'understand-mode', 'node_modules', '.bin', 'codex');
+  const bin = process.env.UNDERSTAND_CODEX_BIN || (fs.existsSync(installedBin) ? installedBin : 'codex');
   const timeout = Number(timeoutMs) > 0 ? Number(timeoutMs) : 300 * 1000;
 
   // このボード専用の根。寄り道で生まれるものは全部この中に閉じ込める
@@ -261,6 +276,7 @@ function createCodex({ parentId, workDir, model, timeoutMs }) {
 
   // 親の記録は「利用者の」保管庫にある。読むのは親の1本だけで、写す先は専用の保管庫
   const sourceCodexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  linkAuthJson(privateCodexHome, sourceCodexHome);
 
   const owned = new Set();          // このボードが成功裏に作った子だけ
   let snapshotDone = false;         // 親の記録の写しは、最初の質問の直前に作る
@@ -386,6 +402,13 @@ function createCodex({ parentId, workDir, model, timeoutMs }) {
     versionChecked = true;
   }
 
+  async function ensureLogin() {
+    const r = await probe(['login', 'status']);
+    if (!r.ok || !(r.stdout + r.stderr).includes('Logged in using ChatGPT')) {
+      throw new Error('CodexにChatGPTでログインしていません。codex login を実行してから開き直してください');
+    }
+  }
+
   // 外部の道具（MCP）がつながっている環境では、寄り道を始めない。
   // モデルを呼ぶたびに確認する（途中で設定が変わっても閉じたままにする）。
   // 終了コードが0でも、認証や起動の失敗が stderr に出ていれば成功とみなさない。
@@ -489,6 +512,8 @@ function createCodex({ parentId, workDir, model, timeoutMs }) {
         // 事前確認のたびに閉じていないか確かめる（閉じる途中で新しい子を産まない）
         await ensureVersion();
         if (closing) return closed();
+        await ensureLogin();
+        if (closing) return closed();
         await checkMcp();
         if (closing) return closed();
         if (!continueSession) ensureSnapshot();
@@ -510,6 +535,8 @@ function createCodex({ parentId, workDir, model, timeoutMs }) {
       if (typeof prompt !== 'string' || !prompt.trim()) return fail('下書きのもとになる文がありません');
       try {
         await ensureVersion();
+        if (closing) return closed();
+        await ensureLogin();
         if (closing) return closed();
         await checkMcp();
         if (closing) return closed();
@@ -547,4 +574,4 @@ function createCodex({ parentId, workDir, model, timeoutMs }) {
   return { ask, draft, close };
 }
 
-module.exports = { createCodex };
+module.exports = { createCodex, parseExecResult, linkAuthJson, secureOwnerFile, stopGroup, DISABLED_FEATURES };

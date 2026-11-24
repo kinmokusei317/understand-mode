@@ -268,6 +268,14 @@ details.result > summary { cursor: pointer; font-family: var(--font); font-size:
 #tz-suggest-text { margin: 6px 0 10px; max-height: 160px; overflow-y: auto; white-space: pre-wrap;
   font-family: var(--serif); font-size: 13px; line-height: 1.9; color: var(--ink); }
 .tz-error { margin: 8px 0 0; font-size: 12.5px; color: var(--pink-ink); }
+.tz-sheet > .tz-error { padding: 4px 18px 8px; }
+.tz-history { flex: 1; overflow: auto; padding: 12px 20px; }
+.tz-history .row { flex-wrap: wrap; }
+.tz-history ol { padding-left: 1.5em; }
+.tz-history li { margin: 12px 0; overflow-wrap: anywhere; }
+.tz-history dl { padding: 8px 12px; background: var(--paper-card); border: 1px solid var(--edge); }
+.tz-history dt { font-size: 12px; color: var(--ink-soft); }
+.tz-history dd { margin: 2px 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 @media (max-width: 700px) {
   #tz-dialog { width: 100vw; height: 100vh; height: 100dvh; }
