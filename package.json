@@ -14,6 +14,7 @@
     "test:tsuzuri": "node dev/test-tsuzuri.js",
     "test:model-picker": "node dev/test-model-picker.js",
     "test:login-cli": "node dev/test-login-cli.js",
+    "test:login-screen": "node dev/test-login-screen.js",
     "test:installed": "node dev/test-installed-login.js",
     "test:revisions": "node dev/test-revisions.js",
     "test:local-images": "node dev/test-local-images.js"

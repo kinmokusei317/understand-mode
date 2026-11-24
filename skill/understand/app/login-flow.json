@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "checkStatusOn": ["firstOpen", "providerSelected", "manualRecheck"],
+  "states": {
+    "signedIn": "hideLoginGuide",
+    "signedOut": "showProviderLoginButton",
+    "cliMissing": "showInstallGuide",
+    "statusUnknown": "offerStatusRecheck",
+    "modelUnavailable": "offerModelSelection"
+  },
+  "providers": {
+    "codex": {
+      "buttonLabel": "Codex にログイン",
+      "loginCommand": ["codex", "login"],
+      "statusCommand": ["codex", "login", "status"]
+    },
+    "claude": {
+      "buttonLabel": "Claude にログイン",
+      "loginCommand": ["claude", "auth", "login", "--claudeai"],
+      "statusCommand": ["claude", "auth", "status", "--json"]
+    }
+  },
+  "login": {
+    "startOnlyOnButtonPress": true,
+    "credentialEntry": "officialProviderFlowOnly",
+    "recheckLabel": "ログイン状態を再確認",
+    "keepBoardUsable": true,
+    "preserveQuestionDraft": true,
+    "autoSubmitQuestion": false
+  }
+}
