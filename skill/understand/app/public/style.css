@@ -225,6 +225,61 @@ details.result > summary { cursor: pointer; font-family: var(--font); font-size:
 .done h1 { font-family: var(--serif); font-size: 24px; font-weight: 500; margin: 0 0 10px; }
 .done p { color: var(--ink-soft); }
 
+/* ---------- Tsuzuriノート ---------- */
+/* 本筋カードの肩に添える小さな入口 */
+.tz-open { position: absolute; top: 18px; right: 20px; font-size: 11.5px; padding: 4px 12px;
+  border: 1px solid var(--edge); border-radius: 999px; background: transparent; color: var(--ink-soft); }
+.tz-open:hover { background: var(--sand-100); color: var(--ink); }
+
+/* ノート1冊分の紙面。モーダルなので中だけスクロールさせる */
+#tz-dialog { border: 0; padding: 0; background: transparent; max-width: none; max-height: none;
+  width: min(920px, calc(100vw - 40px)); height: min(760px, calc(100vh - 48px)); }
+#tz-dialog::backdrop { background: rgba(60,55,40,.32); }
+.tz-sheet { display: flex; flex-direction: column; height: 100%; background: var(--paper);
+  border: 1px solid var(--edge); border-radius: 3px; box-shadow: 0 18px 60px rgba(60,55,40,.3); overflow: hidden; }
+.tz-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 12px 18px;
+  border-bottom: 1px solid var(--edge); background: var(--paper-card); }
+.tz-head strong { font-family: var(--serif); font-size: 17px; font-weight: 500; letter-spacing: .04em; }
+.tz-head .tz-note { margin: 0; }
+.tz-head .btn-outline { min-height: 32px; padding: 0 14px; font-size: 12px; }
+.tz-tabs { display: flex; gap: 2px; padding: 3px; border: 1px solid var(--edge); border-radius: 999px; background: var(--sand-100); }
+.tz-tab { font-size: 12px; min-height: 28px; padding: 0 14px; border: 0; border-radius: 999px; background: transparent; color: var(--ink); }
+.tz-tab.on { background: var(--paper-card); color: var(--ink); box-shadow: 0 1px 3px rgba(80,70,40,.15); }
+.tz-body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+.tz-edit { flex: 1; border: 0; outline: none; resize: none; padding: 18px 24px;
+  font-family: var(--mono); font-size: 13.5px; line-height: 2.05; color: var(--ink); background: var(--paper);
+  background-image: linear-gradient(var(--grid) 1px, transparent 1px); background-size: 100% 2.05em; background-attachment: local; }
+.tz-read { flex: 1; overflow-y: auto; padding: 18px 28px; }
+.tz-words { flex: 1; overflow-y: auto; padding: 14px 20px; display: flex; flex-direction: column; gap: 6px; }
+.tz-word { display: flex; align-items: baseline; gap: 8px; padding: 8px 12px; text-align: left;
+  border: 1px solid var(--edge); border-radius: 2px; background: var(--paper-card); color: var(--ink); }
+.tz-word:hover { background: var(--sand-100); }
+.tz-word-from { font-family: var(--serif); word-break: keep-all; }
+.tz-word-arrow { color: var(--ink-soft); }
+.tz-word-to { font-family: var(--serif); font-weight: 700; color: var(--coral); word-break: keep-all; }
+.tz-word-note { margin-left: auto; font-size: 11.5px; color: var(--ink-soft); }
+.tz-foot { padding: 10px 18px 12px; border-top: 1px solid var(--edge); background: var(--paper-card); }
+.tz-foot .muted.small { margin: 0 0 6px; }
+.tz-foot #tz-comment { flex: 1; min-width: 160px; font-family: inherit; font-size: 12.5px; padding: 8px 12px;
+  border: 1px solid var(--edge); border-radius: 999px; background: var(--paper); color: var(--ink); }
+.tz-foot .btn-primary { min-height: 36px; padding: 0 18px; font-size: 12.5px; }
+.tz-suggest { margin-top: 8px; padding: 10px 14px; border: 1px solid var(--amber-line); border-radius: 2px; background: #fdf6e5; }
+.tz-suggest .label { font-size: 11.5px; color: var(--ink-soft); }
+#tz-suggest-text { margin: 6px 0 10px; max-height: 160px; overflow-y: auto; white-space: pre-wrap;
+  font-family: var(--serif); font-size: 13px; line-height: 1.9; color: var(--ink); }
+.tz-error { margin: 8px 0 0; font-size: 12.5px; color: var(--pink-ink); }
+
+@media (max-width: 700px) {
+  #tz-dialog { width: 100vw; height: 100vh; height: 100dvh; }
+  .tz-sheet { border-radius: 0; border: 0; }
+  .tz-head { padding: 10px 12px; gap: 8px; }
+  .tz-head .tz-note { display: none; }
+  .tz-edit, .tz-read, .tz-words { padding-left: 14px; padding-right: 14px; }
+  /* 狭い画面では語と補足を別の行にし、語が途中で折れないようにする */
+  .tz-word { display: grid; grid-template-columns: auto auto auto; justify-content: start; column-gap: 8px; row-gap: 2px; }
+  .tz-word-note { grid-column: 1 / -1; margin-left: 0; }
+}
+
 /* ---------- レビュー付箋・コード ---------- */
 .sticky.t-review { background: var(--green-note); }
 .sticky.t-review .st-tape { background: rgba(90,150,110,.22); }

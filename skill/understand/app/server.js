@@ -267,11 +267,15 @@ function checkSql(raw) {
   return { sql };
 }
 
-function runClaude({ prompt, resume, fork, allowedTools, disallowedTools, appendSystem, matchMainMode }) {
+function runClaude({ prompt, resume, fork, allowedTools, disallowedTools, appendSystem, matchMainMode, noTools }) {
   return new Promise((resolve) => {
     const cmd = ['-p', prompt, '--output-format', 'json'];
     if (resume) { cmd.push('--resume', resume); if (fork) cmd.push('--fork-session'); }
     if (appendSystem) cmd.push('--append-system-prompt', appendSystem);
+    // 推敲のような「文章だけほしい」呼び出しは、道具と外部連携を全部閉じる。
+    // 記録も残さない（--no-session-persistence）ので、後で消す対象にも載せない。
+    // --bare は OAuth を切ってしまうため使わない
+    if (noTools) cmd.push('--tools', '', '--no-session-persistence', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}');
     if (allowedTools && allowedTools.length) cmd.push('--allowedTools', ...allowedTools);
     if (disallowedTools && disallowedTools.length) cmd.push('--disallowedTools', ...disallowedTools);
     cmd.push('--effort', FORK_EFFORT);
@@ -289,7 +293,7 @@ function runClaude({ prompt, resume, fork, allowedTools, disallowedTools, append
       clearTimeout(timer);
       try {
         const j = JSON.parse(stdout);
-        if (j.session_id && j.session_id !== mainSessionId) createdSessions.add(j.session_id);
+        if (j.session_id && j.session_id !== mainSessionId && !noTools) createdSessions.add(j.session_id);
         if (j.is_error) return resolve({ ok: false, error: j.result || 'Claudeがエラーを返しました', sessionId: j.session_id });
         resolve({ ok: true, text: j.result || '', sessionId: j.session_id, costUsd: j.total_cost_usd });
       } catch (_) {
@@ -345,7 +349,7 @@ const server = http.createServer(async (req, res) => {
       const markdown = fs.existsSync(mdPath) ? fs.readFileSync(mdPath, 'utf8') : '# 本筋がありません\n\nmain.md が見つかりませんでした。';
       let title = '';
       try { title = fs.readFileSync(path.join(WORK_DIR, 'title.txt'), 'utf8').trim(); } catch (_) {}
-      return send(res, 200, { markdown, title, hasSession: !!mainSessionId, project: path.basename(PROJECT_CWD), autoRun: AUTO_RUN, backend: AGENT, canRunSql: !IS_CODEX, sqlEnabled: !IS_CODEX });
+      return send(res, 200, { markdown, title, hasSession: !!mainSessionId, project: path.basename(PROJECT_CWD), autoRun: AUTO_RUN, backend: AGENT, canRunSql: !IS_CODEX, sqlEnabled: !IS_CODEX, tsuzuri: true });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/ask') {
@@ -424,6 +428,36 @@ const server = http.createServer(async (req, res) => {
       }
       const result = await runClaude({ prompt, disallowedTools: ASK_DISALLOWED });
       return send(res, 200, result);
+    }
+
+    // Tsuzuriノートの推敲。抜粋と読み手の希望だけを渡す（本筋・付箋の文脈は載せない）。
+    // 道具は使わせないので、Claude には --tools ''、Codex には記録を残さない --ephemeral の下書き。
+    if (req.method === 'POST' && url.pathname === '/api/tsuzuri/revise') {
+      const b = await readBody(req);
+      const text = typeof b.text === 'string' ? b.text : '';
+      const comment = typeof b.comment === 'string' ? b.comment : '';
+      if (!text.trim()) return send(res, 200, { ok: false, error: '推敲する文を選んでください。' });
+      if (text.length > 12000) return send(res, 200, { ok: false, error: '抜粋が長すぎます（12000字まで）。' });
+      if (comment.length > 1000) return send(res, 200, { ok: false, error: '読み手への希望が長すぎます（1000字まで）。' });
+      // 推敲の考え方は upstream の資料をそのまま渡す（要約や言い換えはしない）
+      let reference;
+      try {
+        reference = fs.readFileSync(path.join(PUBLIC_DIR, 'vendor', 'tsuzuri', 'intent-quality.md'), 'utf8');
+      } catch (e) {
+        return send(res, 200, { ok: false, error: `推敲の参考資料を読めませんでした: ${e.message}` });
+      }
+      const prompt = [
+        'Tsuzuriの推敲です。次のJSONは原稿の抜粋と読み手からの希望です。外部の道具は使いません。',
+        'この文で読み手が何を得るかを考え、主語と指示対象を明確にし、重複を省いて自然な日本語にしてください。事実・数値・確かさ・引用・コード・Markdown構造を保ち、根拠を足さないでください。',
+        '修正した抜粋だけを返してください。説明や前置きは不要です。',
+        '推敲の参考（Tsuzuri「執筆意図の質の確認」）:\n' + reference,
+        JSON.stringify({ text, comment }),
+      ].join('\n');
+      if (IS_CODEX) {
+        if (codexClosed) return send(res, 200, { ok: false, error: 'このボードはすでに閉じています' });
+        return send(res, 200, await codex().draft(prompt));
+      }
+      return send(res, 200, await runClaude({ prompt, noTools: true }));
     }
 
     if (req.method === 'POST' && url.pathname === '/api/return') {

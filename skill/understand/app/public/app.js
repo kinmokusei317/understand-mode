@@ -22,6 +22,9 @@ let canRunSql = true;
 // 応答してくれる側の呼び名（Claude / Codex）。表示だけに使う
 let agentLabel = 'Claude';
 let isCodex = false;
+// /api/init で届いた本筋の生のMarkdownと題名。TsuzuriノートはDOMではなくこれを写す
+let mainMarkdown = '';
+let mainTitle = '';
 
 const board = $('#board'), world = $('#world'), wires = $('#wires');
 const mainCard = $('#main-card'), mainBody = $('#main-body');
@@ -62,8 +65,14 @@ async function post(url, body) {
 // ---------------- 初期化 ----------------
 async function init() {
   let data;
-  try { data = await fetch('/api/init', { headers: apiHeaders }).then((r) => r.json()); }
+  let initOk = false;
+  try { data = await fetch('/api/init', { headers: apiHeaders }).then((r) => r.json()); initOk = true; }
   catch (_) { data = { markdown: '# 接続できません', project: '' }; }
+  mainMarkdown = data.markdown || '';
+  mainTitle = data.title || '';
+  // Tsuzuriノートは、この版のサーバー（tsuzuri:true）が本筋を返せたときだけ開ける。
+  // 古いサーバーが配る新しい画面では、入口ごと出さない
+  $('#btn-tsuzuri').hidden = !(initOk && data.tsuzuri === true && mainMarkdown.length > 0);
   mainBody.innerHTML = md(data.markdown);
   mainBody.querySelectorAll('pre > code').forEach((code) => {
     if (code.classList.contains('language-mermaid')) {
@@ -949,6 +958,7 @@ async function finishWith(text) {
   const r = await post('/api/return', { text });
   if (!r.ok) { alert(r.error || '送れませんでした'); return; }
   try { sessionStorage.removeItem(STORE_KEY); } catch (_) {}
+  try { sessionStorage.removeItem(TZ_STORE); } catch (_) {}
   selectedForReturn = null;
   $('#return-modal').hidden = true;
   $('#selection-return-modal').hidden = true;
@@ -961,6 +971,204 @@ $('#btn-ret-send').onclick = () => {
   finishWith(t);
 };
 $('#btn-ret-none').onclick = () => { if (confirm('何も返さずに閉じますか？付箋はすべて破棄されます。')) finishWith(''); };
+
+// ---------------- Tsuzuriノート ----------------
+// 本筋の写しを推敲する場所。本筋のDOM・Markdown・選択・返す文には触れない。
+// 下書きはこのボード（この合言葉）のこのタブだけの sessionStorage に置き、
+// メインに返して閉じるときにいっしょに捨てる。開くだけ・打つだけではAIもサーバーも呼ばない。
+const TZ_STORE = 'understand-tsuzuri-' + TOKEN;
+// gen は依頼の世代。閉じる・新しい依頼で古い結果を捨てる
+// draft は sessionStorage に書けないときの頼み（同じページ内でだけ残る）
+const tz = { tab: 'write', words: null, pending: null, busy: false, gen: 0, draft: null, draftWarned: false };
+
+function tzError(msg) {
+  const e = $('#tz-error');
+  e.textContent = msg || '';
+  e.hidden = !msg;
+}
+
+function tzTab(name) {
+  tz.tab = name;
+  ['write', 'read', 'words'].forEach((t) => {
+    $('#tz-tab-' + t).classList.toggle('on', t === name);
+    $('#tz-tab-' + t).setAttribute('aria-selected', t === name ? 'true' : 'false');
+  });
+  $('#tz-edit').hidden = name !== 'write';
+  $('#tz-read').hidden = name !== 'read';
+  $('#tz-words').hidden = name !== 'words';
+  if (name === 'read') $('#tz-read').innerHTML = md($('#tz-edit').value);
+  if (name === 'words') renderTzWords();
+  updateTzSel();
+}
+
+// 下書きはタブの sessionStorage が基本。書けなければこのページの記憶だけに置き、
+// 保存できなかったことを（編集は止めずに）知らせる
+function saveTzDraft() {
+  tz.draft = $('#tz-edit').value;
+  try {
+    sessionStorage.setItem(TZ_STORE, tz.draft);
+  } catch (_) {
+    if (!tz.draftWarned) {
+      tz.draftWarned = true;
+      tzError('このタブでは下書きを保存できませんでした。編集はこのページを開いているあいだ残ります。');
+    }
+  }
+}
+
+function updateTzSel() {
+  const ta = $('#tz-edit');
+  const n = Math.max(0, ta.selectionEnd - ta.selectionStart);
+  $('#tz-sel-info').textContent = n > 0
+    ? `選択中の ${n}字 と「読み手への希望」だけを送ります（原稿全体は送りません）`
+    : '文を選ぶと、その部分と「読み手への希望」だけをAIに送って推敲してもらえます。';
+  // 選択が見えない「書く」以外の表示では、依頼のボタンは押せない
+  $('#btn-tz-revise').disabled = tz.tab !== 'write' || !(n > 0) || tz.busy;
+}
+
+// 語の候補：同梱の校正辞書に当たる所を並べるだけ。自動では置き換えない
+async function renderTzWords() {
+  const box = $('#tz-words');
+  box.innerHTML = '';
+  if (tz.words === null) {
+    box.append(el('p', 'muted', '校正辞書を読んでいます…'));
+    try {
+      const res = await fetch('vendor/tsuzuri/words.tsv');
+      if (!res.ok) throw new Error(String(res.status));
+      const tsv = await res.text();
+      tz.words = [];
+      tsv.split('\n').forEach((line) => {
+        if (!line.trim() || line.startsWith('#')) return;
+        const [pat, to, note] = line.split('\t');
+        if (!pat || !to) return;
+        try { tz.words.push({ re: new RegExp(pat, 'g'), to, note: note || '' }); }
+        catch (_) { /* 後読みを解けないブラウザでは、その語は飛ばす */ }
+      });
+    } catch (_) {
+      tz.words = [];
+      box.innerHTML = '';
+      box.append(el('p', 'muted', '校正辞書を読めませんでした。候補なしでも推敲はできます。'));
+      return;
+    }
+    if (tz.tab !== 'words') return; // 読み込み中に別の表示へ移っていたら描かない
+    box.innerHTML = '';
+  }
+  const text = $('#tz-edit').value;
+  const hits = [];
+  tz.words.forEach((w) => {
+    w.re.lastIndex = 0;
+    let m;
+    while ((m = w.re.exec(text)) && hits.length < 200) {
+      hits.push({ from: m.index, to: m.index + m[0].length, word: m[0], fix: w.to, note: w.note });
+      if (m.index === w.re.lastIndex) w.re.lastIndex++; // 空一致で止まらないため
+    }
+  });
+  hits.sort((a, b) => a.from - b.from);
+  if (!hits.length) { box.append(el('p', 'muted', '校正辞書に当たる語はありません。')); return; }
+  box.append(el('p', 'muted small', `校正辞書（tsuzuri 同梱）に ${hits.length} 件当たりました。押すとその場所を選びます。置き換えるかは読んで決めてください。`));
+  hits.forEach((h) => {
+    const b = el('button', 'tz-word');
+    b.append(el('span', 'tz-word-from', h.word));
+    b.append(el('span', 'tz-word-arrow', '→'));
+    b.append(el('span', 'tz-word-to', h.fix));
+    if (h.note) b.append(el('span', 'tz-word-note', h.note));
+    b.onclick = () => {
+      tzTab('write');
+      const ta = $('#tz-edit');
+      ta.focus();
+      ta.setSelectionRange(h.from, h.to);
+      updateTzSel();
+    };
+    box.append(b);
+  });
+}
+
+$('#btn-tsuzuri').onclick = () => {
+  const ta = $('#tz-edit');
+  // ページの記憶は打つたびに更新される最新。保存に失敗したタブでは sessionStorage より新しい
+  let draft = tz.draft;
+  try { if (draft == null) draft = sessionStorage.getItem(TZ_STORE); } catch (_) {}
+  ta.value = draft != null ? draft : mainMarkdown;
+  $('#tz-suggest').hidden = true;
+  tz.pending = null;
+  tzError('');
+  tzTab('write');
+  $('#tz-dialog').showModal();
+  updateTzSel();
+};
+$('#btn-tz-close').onclick = () => $('#tz-dialog').close();
+// 閉じたら、走っている依頼の結果も表示中の提案も無効にする
+$('#tz-dialog').addEventListener('close', () => {
+  tz.gen++;
+  tz.pending = null;
+  $('#tz-suggest').hidden = true;
+});
+$('#tz-tab-write').onclick = () => tzTab('write');
+$('#tz-tab-read').onclick = () => tzTab('read');
+$('#tz-tab-words').onclick = () => tzTab('words');
+$('#tz-edit').addEventListener('input', () => { saveTzDraft(); if (tz.tab === 'words') renderTzWords(); });
+['select', 'keyup', 'click'].forEach((ev) => $('#tz-edit').addEventListener(ev, updateTzSel));
+$('#tz-comment').addEventListener('input', updateTzSel);
+
+$('#btn-tz-export').onclick = () => {
+  const blob = new Blob([$('#tz-edit').value], { type: 'text/markdown;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${(mainTitle || 'tsuzuri').replace(/[\\/:*?"<>|]/g, '_')}.md`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
+
+// 推敲の依頼は、選んだ範囲と読み手の希望だけを送る（本筋・付箋の文脈は送らない）。
+// 返ってきた提案はまず文字列として見せ、採用されたときだけ、取った時の範囲へ当てる。
+$('#btn-tz-revise').onclick = async () => {
+  const ta = $('#tz-edit');
+  const start = ta.selectionStart, end = ta.selectionEnd;
+  const sel = ta.value.slice(start, end);
+  if (!sel.trim() || tz.busy) return;
+  const snapshot = ta.value;
+  // 前の提案はここで無効にする。新しい依頼のあいだに古い提案を当てさせない
+  tz.pending = null;
+  $('#tz-suggest').hidden = true;
+  const gen = ++tz.gen;
+  const btn = $('#btn-tz-revise');
+  tz.busy = true;
+  btn.disabled = true;
+  btn.textContent = '考えています…';
+  tzError('');
+  const r = await post('/api/tsuzuri/revise', { text: sel, comment: $('#tz-comment').value });
+  tz.busy = false;
+  btn.textContent = '選んだ部分を推敲してもらう';
+  updateTzSel();
+  // 閉じるか新しい依頼で世代が進んでいたら、この結果は捨てる（原稿も提案欄も触らない）
+  if (gen !== tz.gen) return;
+  if (!r.ok) { tzError(r.error || '推敲できませんでした'); return; }
+  // 返ってきた文はそのまま扱う。空かどうかだけは捨てずに確かめる
+  const text = typeof r.text === 'string' ? r.text : '';
+  if (!text.trim()) { tzError('提案が空でした'); return; }
+  tz.pending = { start, end, sel, snapshot, text };
+  $('#tz-suggest-text').textContent = text;
+  $('#tz-suggest').hidden = false;
+};
+
+$('#btn-tz-discard').onclick = () => { tz.pending = null; $('#tz-suggest').hidden = true; };
+$('#btn-tz-adopt').onclick = () => {
+  const p = tz.pending;
+  const ta = $('#tz-edit');
+  if (!p) return;
+  // 待っているあいだに原稿が変わっていたら、取った時の範囲がずれている。当てずに止める
+  if (ta.value !== p.snapshot || ta.value.slice(p.start, p.end) !== p.sel) {
+    tzError('待っているあいだに原稿が変わったので、提案を当てられませんでした。もう一度選んでください。');
+    return;
+  }
+  ta.value = ta.value.slice(0, p.start) + p.text + ta.value.slice(p.end);
+  saveTzDraft();
+  tz.pending = null;
+  $('#tz-suggest').hidden = true;
+  const end = p.start + p.text.length;
+  ta.focus();
+  ta.setSelectionRange(p.start, end);
+  updateTzSel();
+};
 
 window.addEventListener('resize', drawWires);
 init();

@@ -10,7 +10,8 @@
     "test:codex": "node dev/test-codex-contract.js && node dev/test-codex.js",
     "link": "bash dev/link-skill.sh",
     "pr-demo": "bash dev/make-pr-demo.sh",
-    "test:figures": "node dev/test-figures.js"
+    "test:figures": "node dev/test-figures.js",
+    "test:tsuzuri": "node dev/test-tsuzuri.js"
   },
   "devDependencies": {
     "playwright": "^1.48.0"

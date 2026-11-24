@@ -35,7 +35,7 @@ sequenceDiagram
 | `skill/understand/pr-guide.md` | 依頼文がPR・ブランチのときの、説明文書の作り方 |
 | `skill/understand/app/server.js` | ローカルサーバー。依存パッケージなし（Node 18+ 標準のみ）。設定ファイルを持たない |
 | `skill/understand/app/public/` | 画面（素の JS。ビルドなし）。`favicon.svg` は水面から潜るアイコン。見た目は方眼ノート風 |
-| `skill/understand/app/public/vendor/` | marked 12.0.2 / DOMPurify 3.4.17 / mermaid 12.3.0 / vega 6.4.0 / vega-lite 6.5.0 / vega-embed 7.3.0（オフラインで動くよう同梱。ライセンス同梱） |
+| `skill/understand/app/public/vendor/` | marked 12.0.2 / DOMPurify 3.4.17 / mermaid 12.3.0 / vega 6.4.0 / vega-lite 6.5.0 / vega-embed 7.3.0（オフラインで動くよう同梱。ライセンス同梱）。`vendor/tsuzuri/` に [tsuzuri](https://github.com/MaryCache/tsuzuri) @ `61e346b` の `words.tsv`・`intent-quality.md` と MIT LICENSE（語の候補と推敲の参考資料。範囲は `vendor/tsuzuri/README.md`） |
 | `dev/` | 開発用（モック、e2e、SQL実行のテスト、サンプルPR作成、スキルのリンク）。デモの題材は作り話です |
 
 ## 作業フォルダ `<DIR>`
@@ -54,10 +54,11 @@ sequenceDiagram
 | API | 内容 |
 | --- | --- |
 | （全API共通） | 起動ごとに作る合言葉を照合する。`Host` と `Origin` も見て、別のページ・別のプロセスからの操作を断る（`denyReason()`）。合言葉はURLの `?t=` でブラウザに渡し、画面は `X-Understand-Token` ヘッダで返す |
-| `GET /api/init` | `main.md`・題名・プロジェクト名・セッションの有無 |
+| `GET /api/init` | `main.md`・題名・プロジェクト名・セッションの有無・`tsuzuri:true`（推敲ノートが使える版の印。画面はこれが無いと入口を出さない） |
 | `POST /api/ask` | 付箋の質問。初回は `{action, anchor, question, sessionId(親), continueSession:false}` で親から**分岐**。続きは `{followUp, sessionId(この付箋), continueSession:true}` で同じセッションに積む |
 | `POST /api/runsql` | SQLの実行。参照だけのSQLか検査し、「いつものやり方で実行して」と頼む。**どの道具を使うかは指定しない**（`--allowedTools` を渡さないので、その人が普段 Claude Code に与えている許可がそのまま使われる）。メインが `bypassPermissions` ならそれも分身に渡す。` ```json {columns, rows}` と ` ```vega-lite`（data は書かせない）を返させる |
 | `POST /api/draft` | 返す文の下書き。分岐せず、メモだけを渡して軽いモデル（既定 sonnet）で作る |
+| `POST /api/tsuzuri/revise` | Tsuzuriノートの推敲。`{text, comment}`（12000字・1000字まで、textは空でないこと）。抜粋と希望に、`vendor/tsuzuri/intent-quality.md`（upstream の確認事項、そのまま）を同封して渡す：Claude は `runClaude` を `noTools`（`--tools '' --no-session-persistence --strict-mcp-config --mcp-config '{"mcpServers":{}}'`）で、Codex は `codex().draft`（`--ephemeral`）で。親・付箋の文脈は載せない |
 | `POST /api/return` | `return.md` を書き、このサーバーが作った分岐セッションの `.jsonl` を削除して終了 |
 
 ### セッションの木

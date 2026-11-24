@@ -29,6 +29,7 @@
     <svg id="wires" aria-hidden="true"></svg>
     <article id="main-card" class="main-card">
       <p class="eyebrow">本筋</p>
+      <button id="btn-tsuzuri" class="tz-open" type="button" hidden>Tsuzuriで推敲</button>
       <div id="main-body" class="md selectable" data-source="main"></div>
     </article>
   </div>
@@ -87,6 +88,46 @@
     </div>
   </section>
 </div>
+
+<!-- 本筋の写しを推敲するノート（本筋そのものは触らない） -->
+<dialog id="tz-dialog" aria-labelledby="tz-title">
+  <div class="tz-sheet">
+    <header class="tz-head">
+      <strong id="tz-title">Tsuzuriで推敲</strong>
+      <span class="muted small tz-note">本筋の写しです。ここで直しても元の文は変わりません</span>
+      <span class="spacer"></span>
+      <div class="tz-tabs" role="tablist" aria-label="表示の切り替え">
+        <button id="tz-tab-write" class="tz-tab on" role="tab" aria-selected="true">書く</button>
+        <button id="tz-tab-read" class="tz-tab" role="tab" aria-selected="false">読む</button>
+        <button id="tz-tab-words" class="tz-tab" role="tab" aria-selected="false">語の候補</button>
+      </div>
+      <button id="btn-tz-export" class="btn-outline" type="button">Markdownを書き出す</button>
+      <button id="btn-tz-close" class="btn-outline" type="button">閉じる</button>
+    </header>
+    <div class="tz-body">
+      <textarea id="tz-edit" class="tz-edit" spellcheck="false" aria-label="推敲する原稿"></textarea>
+      <div id="tz-read" class="tz-read md" hidden></div>
+      <div id="tz-words" class="tz-words" hidden></div>
+    </div>
+    <footer class="tz-foot">
+      <p class="muted small" id="tz-sel-info">文を選ぶと、その部分だけをAIに推敲してもらえます。</p>
+      <div class="row">
+        <label for="tz-comment" class="label">読み手への希望</label>
+        <input id="tz-comment" type="text" maxlength="1000" placeholder="任意。例：初めて読む人向けに">
+        <button id="btn-tz-revise" class="btn-primary" type="button" disabled>選んだ部分を推敲してもらう</button>
+      </div>
+      <div id="tz-suggest" class="tz-suggest" hidden>
+        <p class="label">提案（採用するまで原稿は変わりません）</p>
+        <pre id="tz-suggest-text"></pre>
+        <div class="row end">
+          <button id="btn-tz-discard" class="btn-outline" type="button">捨てる</button>
+          <button id="btn-tz-adopt" class="btn-primary" type="button">この提案に替える</button>
+        </div>
+      </div>
+      <p id="tz-error" class="tz-error" hidden></p>
+    </footer>
+  </div>
+</dialog>
 
 <div id="done" class="done" hidden>
   <div>
